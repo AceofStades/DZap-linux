@@ -46,7 +46,7 @@ func SanitizeDrive(config WipeConfig, progress chan<- string) error {
 			return fmt.Errorf("drive is in a frozen state")
 		}
 		return sanitizeSATA(targetDrive.Name, progress)
-	case HDD, USB:
+	case HDD, USB, UNKN:
 		return sanitizeOverwrite(targetDrive.Name, 1, progress)
 	default:
 		return fmt.Errorf("unsupported drive type for sanitization")

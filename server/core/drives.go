@@ -137,6 +137,10 @@ func DetectDrives() ([]Drive, error) {
 }
 
 func (d *Drive) determineDriveType(name string, isRotational bool) {
+	if strings.HasPrefix(name, "nbd") {
+		d.Type = UNKN
+		return
+	}
 	if strings.HasPrefix(name, "nvme") {
 		d.Type = NVME
 		return

@@ -61,6 +61,13 @@ const WIPE_OPTIONS: { [key: string]: WipeMethod[] } = {
 			description: "The most reliable method for most USB flash drives.",
 		},
 	],
+	Unknown: [
+		{
+			id: "overwrite_1_pass",
+			label: "🔥 1-Pass Overwrite",
+			description: "A safe default for unrecognized device types.",
+		},
+	],
 };
 
 export default function Layout() {
