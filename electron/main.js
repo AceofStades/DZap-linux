@@ -1,101 +1,122 @@
-const { spawn } = require("child_process");
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
+const { spawn } = require("child_process");
+const fetch = require("node-fetch");
+const WebSocket = require("ws");
 
+let goBackend;
 let mainWindow;
-const isDev = !app.isPackaged;   // ✅ detect dev vs prod
 
 function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
+	mainWindow = new BrowserWindow({
+		width: 1200,
+		height: 800,
+		webPreferences: {
+			preload: path.join(__dirname, "preload.js"),
+			contextIsolation: true,
+			nodeIntegration: false,
+			webSecurity: false, // For development with Vite
+		},
+	});
 
-  if (isDev) {
-    mainWindow.loadURL("http://localhost:5173");  // vite dev server
-    mainWindow.webContents.openDevTools();        // optional
-  } else {
-    mainWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
-  }
-
-  mainWindow.on("closed", () => {
-    mainWindow = null;
-  });
+	const viteUrl = "http://localhost:5173";
+	mainWindow.loadURL(viteUrl).catch((err) => {
+		console.error(
+			"Failed to load Vite URL. Is the frontend server running?",
+			err,
+		);
+	});
+	mainWindow.webContents.openDevTools();
 }
 
-/* ✅ Ensure only one instance of Electron */
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
-  process.exit(0);
+function startGoBackend() {
+	const binaryPath = path.join(__dirname, "../server/server"); // Path to the compiled Go binary
+
+	// Important: Use 'sudo' to launch the Go backend with necessary permissions
+	goBackend = spawn("sudo", [binaryPath]);
+
+	goBackend.stdout.on("data", (data) => console.log(`[Go Backend]: ${data}`));
+	goBackend.stderr.on("data", (data) =>
+		console.error(`[Go Backend ERR]: ${data}`),
+	);
+}
+
+function setupWebSocket() {
+	const ws = new WebSocket("ws://localhost:8080/ws");
+	ws.on("open", () => console.log("WebSocket connected to Go backend."));
+	ws.on("message", (message) => {
+		if (mainWindow) {
+			mainWindow.webContents.send("backend-log", message.toString());
+		}
+	});
+	ws.on("error", (err) => console.error("WebSocket error:", err));
 }
 
 app.whenReady().then(() => {
-  createWindow();
-  startGoBackend();   // start Go process once
-});
-
-app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+	// We no longer start the backend here. The `npm start` script handles it.
+	createWindow();
+	setTimeout(setupWebSocket, 2000); // Give server a moment to start
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+	if (goBackend) goBackend.kill();
+	if (process.platform !== "darwin") app.quit();
 });
 
-/* --------- IPC handler for detectDrives --------- */
-// Detect drives (ask Go backend)
+// IPC Handlers
+// ipcMain.handle("detect-drives", async () => {
+// 	try {
+// 		const response = await fetch("http://localhost:8080/api/drives");
+// 		return await response.json();
+// 	} catch (error) {
+// 		console.error("IPC Error (detect-drives):", error);
+// 		return [];
+// 	}
+// });
+
 ipcMain.handle("detect-drives", async () => {
-  return new Promise((resolve, reject) => {
-    if (!goProc) {
-      return reject("Go backend not running");
-    }
+	try {
+		const response = await fetch("http://localhost:8080/api/drives");
 
-    // Send command to Go backend via stdin
-    goProc.stdin.write(JSON.stringify({ action: "detect-drives" }) + "\n");
+		// Check if the server responded with an error status code
+		if (!response.ok) {
+			const errorData = await response.json();
+			// Throw an error with the specific message from the backend
+			throw new Error(
+				errorData.error || `Server responded with ${response.status}`,
+			);
+		}
 
-    // Listen for one-time response
-    const handleData = (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.type === "drive-list") {
-          goProc.stdout.off("data", handleData);
-          resolve(msg.drives);
-        }
-      } catch (e) {
-        console.error("Failed to parse drive list:", e);
-      }
-    };
-
-    goProc.stdout.on("data", handleData);
-  });
+		const drives = await response.json();
+		return drives;
+	} catch (error) {
+		console.error("IPC Error (detect-drives):", error);
+		// Re-throw the error so the frontend can catch it
+		throw error;
+	}
 });
 
+ipcMain.handle("get-drive-health", async (event, driveName) => {
+	try {
+		const response = await fetch(
+			`http://localhost:8080/api/drive/${driveName}/health`,
+		);
+		return await response.json();
+	} catch (error) {
+		console.error(`IPC Error (get-drive-health for ${driveName}):`, error);
+		return null;
+	}
+});
 
-/* --------- Spawn Go backend --------- */
-function startGoBackend() {
-  const goBinary = path.join(__dirname, "../go-backend/backend"); // compiled binary path
-
-  const goProc = spawn(goBinary, [], { cwd: path.dirname(goBinary) });
-
-  goProc.stdout.on("data", (data) => {
-    const log = data.toString().trim();
-    console.log("[Go Backend]", log);
-
-    if (mainWindow) {
-      mainWindow.webContents.send("backend-log", log);
-    }
-  });
-
-  goProc.stderr.on("data", (data) => {
-    console.error("[Go Backend Error]", data.toString());
-  });
-
-  goProc.on("close", (code) => {
-    console.log(`Go backend exited with code ${code}`);
-  });
-}
+ipcMain.on("backend-command", (event, command) => {
+	if (command.action === "wipe") {
+		fetch("http://localhost:8080/api/wipe", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				devicePath: command.drive,
+				method: command.method,
+			}),
+		}).catch((err) => console.error("IPC Error (wipe command):", err));
+	}
+});

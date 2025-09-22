@@ -1,9 +1,12 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
-  detectDrives: () => ipcRenderer.invoke("detect-drives"),
-  quickWipe: (drive) => ipcRenderer.invoke("quick-wipe", drive),
-  onBackendLog: (callback) => ipcRenderer.on("backend-log", (_, log) => callback(log)),
-  advancedWipe: (drive) => ipcRenderer.invoke("advanced-wipe", drive),
-  onLog: (callback) => ipcRenderer.on("log", (_, msg) => callback(msg)),
+	invoke: (channel, data) => ipcRenderer.invoke(channel, data),
+	send: (channel, data) => ipcRenderer.send(channel, data),
+	onBackendLog: (callback) => {
+		const listener = (event, ...args) => callback(...args);
+		ipcRenderer.on("backend-log", listener);
+		// Return a function to remove the listener
+		return () => ipcRenderer.removeListener("backend-log", listener);
+	},
 });
