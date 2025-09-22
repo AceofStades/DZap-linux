@@ -1,5 +1,2 @@
-# DZap
-
-Drive Zap: A secure, cross-platform data wiping application that works on Windows, Linux, and Android devices.
-
-SIH PS: 25070
+Secure Wipe App - Electron (frontend) + React + Go (backend)
+Step 1: environment & scaffold completed.

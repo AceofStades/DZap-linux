@@ -1,8 +1,0 @@
-node_modules/
-frontend/node_modules/
-electron/node_modules/
-dist/
-*.log
-*.exe
-*.AppImage
-backend/bin/
