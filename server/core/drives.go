@@ -29,17 +29,6 @@ type Drive struct {
 	IsFrozen  bool      `json:"isFrozen"`
 }
 
-// type lsblkOutput struct {
-// 	BlockDevices []struct {
-// 		Name       string `json:"name"`
-// 		Model      string `json:"model"`
-// 		Size       int64  `json:"size"`
-// 		Rotational bool   `json:"rota"`
-// 		Type       string `json:"type"`
-// 		MountPoint string `json:"mountpoint"`
-// 	} `json:"blockdevices"`
-// }
-
 type lsblkDevice struct {
 	Name       string        `json:"name"`
 	Model      string        `json:"model"`
@@ -53,41 +42,6 @@ type lsblkDevice struct {
 type lsblkOutput struct {
 	BlockDevices []lsblkDevice `json:"blockdevices"`
 }
-
-// func DetectDrives() ([]Drive, error) {
-// 	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINT")
-// 	out, err := cmd.Output()
-// 	if err != nil {
-// 		return nil, fmt.Errorf("lsblk failed: %w", err)
-// 	}
-
-// 	var lsblkData lsblkOutput
-// 	if err := json.Unmarshal(out, &lsblkData); err != nil {
-// 		return nil, err
-// 	}
-
-// 	var drives []Drive
-// 	for _, dev := range lsblkData.BlockDevices {
-// 		if dev.Type != "disk" && dev.Type != "rom" {
-// 			continue
-// 		}
-
-// 		drive := Drive{
-// 			Name:      "/dev/" + dev.Name,
-// 			Model:     strings.TrimSpace(dev.Model),
-// 			Size:      strconv.FormatInt(dev.Size, 10),
-// 			IsMounted: dev.MountPoint != "",
-// 		}
-// 		drive.determineDriveType(dev.Name, dev.Rotational)
-
-// 		if drive.Type == SSD {
-// 			frozen, _ := isDriveFrozen(drive.Name)
-// 			drive.IsFrozen = frozen
-// 		}
-// 		drives = append(drives, drive)
-// 	}
-// 	return drives, nil
-// }
 
 func DetectDrives() ([]Drive, error) {
 	// Add "children" to the JSON output
@@ -108,7 +62,6 @@ func DetectDrives() ([]Drive, error) {
 			continue
 		}
 
-		// ✅ NEW: Check the device and all its children for a mount point
 		isMounted := dev.MountPoint != ""
 		if !isMounted {
 			for _, child := range dev.Children {
