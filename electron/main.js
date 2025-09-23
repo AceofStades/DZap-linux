@@ -26,7 +26,7 @@ function createWindow() {
 			err,
 		);
 	});
-	mainWindow.webContents.openDevTools();
+	// mainWindow.webContents.openDevTools();
 }
 
 function startGoBackend() {
