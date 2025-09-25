@@ -61,6 +61,34 @@ func GetWipeMethodsForMobile(device MobileDevice) []WipeMethod {
 	}
 }
 
+// GetWipeMethods returns the available wipe methods for a specific device.
+func GetWipeMethods(devicePath string) ([]WipeMethod, error) {
+	drives, err := detectStorageDrives()
+	if err != nil {
+		return nil, fmt.Errorf("could not detect drives: %w", err)
+	}
+
+	for _, drive := range drives {
+		if drive.Name == devicePath {
+			return GetWipeMethodsForDrive(drive), nil
+		}
+	}
+
+	// Also check mobile devices
+	mobileDevices, err := detectAndroidDevices()
+	if err != nil {
+		// Non-fatal, just log it
+		fmt.Printf("could not detect mobile devices: %v", err)
+	}
+	for _, device := range mobileDevices {
+		if device.Serial == devicePath { // Assuming devicePath is the serial for mobile
+			return GetWipeMethodsForMobile(device), nil
+		}
+	}
+
+	return nil, fmt.Errorf("device %s not found", devicePath)
+}
+
 func SanitizeDevice(config WipeConfig, progress chan<- string) error {
 	defer close(progress)
 

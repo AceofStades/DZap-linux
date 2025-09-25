@@ -87,3 +87,26 @@ func WipeDriveHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "Wipe process started"})
 }
+
+func GetWipeMethodsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// The identifier is the last part of the path before /wipe-methods
+	parts := strings.Split(r.URL.Path, "/")
+	identifier := parts[len(parts)-2]
+
+	// Assume it could be a storage device first
+	devicePath := "/dev/" + identifier
+	methods, err := core.GetWipeMethods(devicePath)
+	if err != nil {
+		// If that fails, assume it might be a mobile device serial
+		methods, err = core.GetWipeMethods(identifier)
+		if err != nil {
+			log.Printf("ERROR in GetWipeMethodsHandler for identifier '%s': %v", identifier, err)
+			respondWithError(w, http.StatusNotFound, "Device not found or methods unavailable: "+err.Error())
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(methods)
+}

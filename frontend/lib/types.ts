@@ -1,68 +1,53 @@
-export interface Device {
-  id: string
-  name: string
-  type: "SSD" | "HDD" | "USB" | "Mobile"
-  model: string
-  capacity: string
-  serial: string
-  firmware: string
-  status: "ready" | "wiping" | "completed" | "error"
-  partitions: Partition[]
-  smart: SmartData
+// A base interface with properties common to all devices
+interface BaseDevice {
+	id: string; // A unique identifier (path for storage, serial for mobile)
+	model: string;
+	type: string;
+	name: string;
 }
 
 export interface Partition {
-  name: string
-  size: string
-  type: string
+	name: string;
+	size: string;
+	type: string;
 }
 
-export interface SmartData {
-  health: string
-  temperature: string
-  powerOnHours: string
-  totalWrites: string
-  wearLeveling?: string
-  badSectors: string
+// Specific type for standard storage drives
+export interface StorageDevice extends BaseDevice {
+	deviceCategory: "storage";
+	size: string;
+	isMounted: boolean;
+	isFrozen: boolean;
+	partitions: Partition[];
+	status?: "ready" | "wiping" | "completed" | "error" | "not-ready";
+	health?: DriveHealth;
 }
 
-export interface WipeJob {
-  id: string
-  deviceId: string
-  deviceName: string
-  deviceModel: string
-  method: string
-  status: "queued" | "running" | "paused" | "completed" | "failed"
-  progress: number
-  currentPass: number
-  totalPasses: number
-  startTime: string
-  estimatedCompletion?: string
-  speed?: string
+// Specific type for mobile devices
+export interface MobileDevice extends BaseDevice {
+	deviceCategory: "mobile";
+	serial: string;
+	status?: "ready" | "wiping" | "completed" | "error" | "not-ready";
 }
 
-export interface Certificate {
-  id: string
-  certificateId: string
-  deviceName: string
-  deviceModel: string
-  deviceSerial: string
-  wipeMethod: string
-  wipePolicy: string
-  operatorId: string
-  organization: string
-  startTime: string
-  endTime: string
-  status: "valid" | "expired" | "revoked"
-  evidenceHash: string
-  signatureValid: boolean
-  createdAt: string
+// A single, unified type for any device in the app
+export type Device = StorageDevice | MobileDevice;
+
+// --- Other types ---
+
+export interface DriveHealth {
+	predictedStatus: string;
+	failureProbability: number;
+	smartStatus: string;
+	temperature?: string;
+	powerOnHours?: string;
+	totalWrites?: string;
+	wearLeveling?: string;
+	badSectors?: string;
 }
 
-export interface LogEntry {
-  id: string
-  timestamp: string
-  level: "info" | "warning" | "error" | "success"
-  message: string
-  deviceId?: string
+export interface WipeMethod {
+	id: string;
+	name: string;
+	description: string;
 }

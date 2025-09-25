@@ -20,13 +20,20 @@ const (
 	UNKN DriveType = "Unknown"
 )
 
+type Partition struct {
+	Name string `json:"name"`
+	Size string `json:"size"`
+	Type string `json:"type"`
+}
+
 type Drive struct {
-	Name      string    `json:"name"`
-	Model     string    `json:"model"`
-	Size      string    `json:"size"`
-	Type      DriveType `json:"type"`
-	IsMounted bool      `json:"isMounted"`
-	IsFrozen  bool      `json:"isFrozen"`
+	Name       string      `json:"name"`
+	Model      string      `json:"model"`
+	Size       string      `json:"size"`
+	Type       DriveType   `json:"type"`
+	IsMounted  bool        `json:"isMounted"`
+	IsFrozen   bool        `json:"isFrozen"`
+	Partitions []Partition `json:"partitions"`
 }
 
 type MobileDevice struct {
@@ -45,6 +52,7 @@ type lsblkDevice struct {
 	Type       string        `json:"type"`
 	MountPoint string        `json:"mountpoint"`
 	Children   []lsblkDevice `json:"children"`
+	FsType     string        `json:"fstype"`
 }
 
 type lsblkOutput struct {
@@ -71,7 +79,7 @@ func DetectDevices() (map[string]interface{}, error) {
 }
 
 func detectStorageDrives() ([]Drive, error) {
-	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINT")
+	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINT,FSTYPE")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("lsblk command failed: %w", err)
@@ -89,20 +97,24 @@ func detectStorageDrives() ([]Drive, error) {
 		}
 
 		isMounted := dev.MountPoint != ""
-		if !isMounted {
-			for _, child := range dev.Children {
-				if child.MountPoint != "" {
-					isMounted = true
-					break
-				}
+		var partitions []Partition
+		for _, child := range dev.Children {
+			if child.MountPoint != "" {
+				isMounted = true
 			}
+			partitions = append(partitions, Partition{
+				Name: "/dev/" + child.Name,
+				Size: strconv.FormatInt(child.Size, 10),
+				Type: child.FsType,
+			})
 		}
 
 		drive := Drive{
-			Name:      "/dev/" + dev.Name,
-			Model:     strings.TrimSpace(dev.Model),
-			Size:      strconv.FormatInt(dev.Size, 10),
-			IsMounted: isMounted,
+			Name:       "/dev/" + dev.Name,
+			Model:      strings.TrimSpace(dev.Model),
+			Size:       strconv.FormatInt(dev.Size, 10),
+			IsMounted:  isMounted,
+			Partitions: partitions,
 		}
 		drive.determineDriveType(dev.Name, dev.Rotational)
 

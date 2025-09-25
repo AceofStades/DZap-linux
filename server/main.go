@@ -27,6 +27,8 @@ func main() {
 	mux.HandleFunc("/api/drive/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/health") {
 			api.GetDriveHealthHandler(w, r)
+		} else if strings.HasSuffix(r.URL.Path, "/wipe-methods") {
+			api.GetWipeMethodsHandler(w, r)
 		} else {
 			http.NotFound(w, r)
 		}
