@@ -16,24 +16,18 @@ function createWindow() {
 			preload: path.join(__dirname, "preload.js"),
 			contextIsolation: true,
 			nodeIntegration: false,
-			webSecurity: false, // For development with Next.js
+			webSecurity: false, // For development with Vite
 		},
 	});
 
-	// ✅ Detect dev vs prod
-	if (!app.isPackaged) {
-		// Development → Next.js dev server
-		const devUrl = "http://localhost:3000";
-		mainWindow.loadURL(devUrl).catch((err) => {
-			console.error("Failed to load Next.js URL. Is the frontend running?", err);
-		});
-
-		// mainWindow.webContents.openDevTools();
-	} else {
-		// Production → Load exported Next.js build
-		// (Make sure you ran `next build && next export` inside `frontend`)
-		mainWindow.loadFile(path.join(__dirname, "../frontend/out/index.html"));
-	}
+	const viteUrl = "http://localhost:5173";
+	mainWindow.loadURL(viteUrl).catch((err) => {
+		console.error(
+			"Failed to load Vite URL. Is the frontend server running?",
+			err,
+		);
+	});
+	// mainWindow.webContents.openDevTools();
 }
 
 function startGoBackend() {
@@ -60,6 +54,7 @@ function setupWebSocket() {
 }
 
 app.whenReady().then(() => {
+	// We no longer start the backend here. The `npm start` script handles it.
 	createWindow();
 	setTimeout(setupWebSocket, 2000); // Give server a moment to start
 });
@@ -70,12 +65,24 @@ app.on("window-all-closed", () => {
 });
 
 // IPC Handlers
+// ipcMain.handle("detect-drives", async () => {
+// 	try {
+// 		const response = await fetch("http://localhost:8080/api/drives");
+// 		return await response.json();
+// 	} catch (error) {
+// 		console.error("IPC Error (detect-drives):", error);
+// 		return [];
+// 	}
+// });
+
 ipcMain.handle("detect-drives", async () => {
 	try {
 		const response = await fetch("http://localhost:8080/api/drives");
 
+		// Check if the server responded with an error status code
 		if (!response.ok) {
 			const errorData = await response.json();
+			// Throw an error with the specific message from the backend
 			throw new Error(
 				errorData.error || `Server responded with ${response.status}`,
 			);
@@ -85,6 +92,7 @@ ipcMain.handle("detect-drives", async () => {
 		return drives;
 	} catch (error) {
 		console.error("IPC Error (detect-drives):", error);
+		// Re-throw the error so the frontend can catch it
 		throw error;
 	}
 });
@@ -113,3 +121,18 @@ ipcMain.on("backend-command", (event, command) => {
 		}).catch((err) => console.error("IPC Error (wipe command):", err));
 	}
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
