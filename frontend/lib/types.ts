@@ -18,11 +18,11 @@ export interface StorageDevice extends BaseDevice {
 	size: string;
 	isMounted: boolean;
 	isFrozen: boolean;
+	isOSDrive?: boolean;
 	partitions: Partition[];
 	status?: "ready" | "wiping" | "completed" | "error" | "not-ready";
 	health?: DriveHealth;
 }
-
 // Specific type for mobile devices
 export interface MobileDevice extends BaseDevice {
 	deviceCategory: "mobile";
@@ -35,10 +35,18 @@ export type Device = StorageDevice | MobileDevice;
 
 // --- Other types ---
 
+export interface SmartAttribute {
+	id: number;
+	name: string;
+	normalized: number;
+	raw: number;
+}
+
 export interface DriveHealth {
 	predictedStatus: string;
 	failureProbability: number;
 	smartStatus: string;
+	smartAttributes?: { [key: string]: SmartAttribute };
 	temperature?: string;
 	powerOnHours?: string;
 	totalWrites?: string;

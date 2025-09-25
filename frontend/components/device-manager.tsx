@@ -30,6 +30,8 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+
+import { cn } from "@/lib/utils";
 import { ConfirmationModal } from "@/components/confirmation-modal";
 import { useRouter } from "next/navigation";
 import type {
@@ -38,7 +40,12 @@ import type {
 	DriveHealth,
 	WipeMethod,
 } from "@/lib/types";
-import { getDriveHealth, startWipe, getWipeMethods } from "@/lib/utils";
+import {
+	getDriveHealth,
+	startWipe,
+	getWipeMethods,
+	unmountDevice,
+} from "@/lib/utils";
 
 interface DeviceManagerProps {
 	selectedDevice: Device | null;
@@ -113,38 +120,30 @@ export function DeviceManager({
 				DeviceType: device.type,
 			});
 			setShowConfirmation(false);
-			router.push("/?tab=progress");
+			router.push(
+				`/?tab=progress&jobId=${encodeURIComponent(device.id)}`,
+			);
 		} catch (error) {
 			console.error("Failed to start wipe:", error);
 			// TODO: Show an error toast/message
 		}
 	};
 
-	const handleMountDevice = () => {
-		console.log("Unmounting device:", device?.id);
-		// In a real app, this would call a backend API to unmount.
-		// For now, we just refresh the device list.
-		onDeviceUpdate();
-	};
-
-	const handleGenerateCertificate = async () => {
+	const handleMountDevice = async () => {
 		if (!device) return;
-		console.log("Generating certificate for device:", device?.id);
+		console.log("Unmounting device:", device?.id);
 		try {
-			await generateCertificate({
-				model: device.model,
-				serial:
-					device.deviceCategory === "mobile"
-						? device.serial
-						: device.id,
-				method: wipeMethod,
-			});
-			router.push("/?tab=certificates");
+			await unmountDevice(device.id);
+			setTimeout(() => {
+				onDeviceUpdate();
+			}, 1000); // 1-second delay to allow OS to update mount status
 		} catch (error) {
-			console.error("Failed to generate certificate:", error);
-			// TODO: show error toast
+			console.error("Failed to unmount device:", error);
+			// TODO: Show an error toast/message
 		}
 	};
+
+	const handleGenerateCertificate = async () => {};
 
 	const handleStopWipe = () => {
 		setShowStopConfirmation(true);
@@ -192,6 +191,7 @@ export function DeviceManager({
 	const isNotReady = device.status === "not-ready";
 	const isSSD = device.type === "SATA SSD" || device.type === "NVMe SSD";
 	const isReady = device.status === "ready";
+	const isOSDrive = device.deviceCategory === "storage" && device.isOSDrive;
 
 	return (
 		<>
@@ -207,19 +207,18 @@ export function DeviceManager({
 					</div>
 					<div className="flex items-center space-x-2">
 						<Badge
-							className={
-								isReady
-									? "bg-success/20 text-success"
-									: isWiping
-										? "bg-warning/20 text-warning"
-										: isCompleted
-											? "bg-success/20 text-success"
-											: isNotReady
-												? "bg-destructive/20 text-destructive"
-												: "bg-muted/20 text-muted-foreground"
-							}
+							className={cn({
+								"bg-blue-600/20 text-blue-600": isOSDrive,
+								"bg-success/20 text-success":
+									isReady && !isOSDrive,
+								"bg-warning/20 text-warning": isWiping,
+								"bg-destructive/20 text-destructive":
+									isNotReady,
+							})}
 						>
-							{device.status?.toUpperCase() || "UNKNOWN"}
+							{isOSDrive
+								? "OS DRIVE"
+								: device.status?.toUpperCase() || "UNKNOWN"}
 						</Badge>
 					</div>
 				</div>
@@ -396,17 +395,33 @@ export function DeviceManager({
 											{health.smartStatus}
 										</p>
 									</div>
-									<div>
-										<label className="text-sm text-muted-foreground">
-											Failure Probability
-										</label>
-										<p className="text-lg font-medium text-foreground">
-											{(
-												health.failureProbability * 100
-											).toFixed(2)}
-											%
-										</p>
-									</div>
+									{health.failureProbability > 0 && (
+										<div>
+											<label className="text-sm text-muted-foreground">
+												Failure Risk
+											</label>
+											<p className="text-lg font-medium text-foreground">
+												{(
+													health.failureProbability *
+													100
+												).toFixed(2)}
+												%
+											</p>
+										</div>
+									)}
+									{health.smartAttributes &&
+										Object.values(
+											health.smartAttributes,
+										).map((attr) => (
+											<div key={attr.name}>
+												<label className="text-sm text-muted-foreground">
+													{attr.name}
+												</label>
+												<p className="text-lg font-medium text-foreground">
+													{attr.value}
+												</p>
+											</div>
+										))}
 								</div>
 							) : (
 								<p className="text-muted-foreground text-sm">
@@ -419,14 +434,19 @@ export function DeviceManager({
 					</Card>
 				</div>
 
-				<Card className="component-border component-border-hover">
+				<Card
+					className="component-border component-border-hover"
+					disabled={isOSDrive}
+				>
 					<CardHeader>
 						<CardTitle className="flex items-center space-x-2">
 							<Settings className="h-5 w-5" />
 							<span>Wipe Configuration</span>
 						</CardTitle>
 						<CardDescription>
-							Configure data destruction method and parameters
+							{isOSDrive
+								? "Wiping the OS drive is not permitted."
+								: "Configure data destruction method and parameters"}
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="space-y-6">
@@ -438,7 +458,7 @@ export function DeviceManager({
 								<Select
 									value={wipeMethod}
 									onValueChange={setWipeMethod}
-									disabled={isWiping}
+									disabled={isWiping || isOSDrive}
 								>
 									<SelectTrigger>
 										<SelectValue />
@@ -462,7 +482,7 @@ export function DeviceManager({
 								</label>
 								<Select
 									defaultValue="basic"
-									disabled={isWiping}
+									disabled={isWiping || isOSDrive}
 								>
 									<SelectTrigger>
 										<SelectValue />
@@ -487,7 +507,7 @@ export function DeviceManager({
 								variant="outline"
 								size="sm"
 								onClick={() => setShowAdvanced(!showAdvanced)}
-								disabled={isWiping}
+								disabled={isWiping || isOSDrive}
 							>
 								<Settings className="h-4 w-4 mr-2" />
 								{showAdvanced ? "Hide" : "Show"} Advanced
@@ -504,7 +524,7 @@ export function DeviceManager({
 										</label>
 										<Select
 											defaultValue="1mb"
-											disabled={isWiping}
+											disabled={isWiping || isOSDrive}
 										>
 											<SelectTrigger>
 												<SelectValue />
@@ -532,7 +552,7 @@ export function DeviceManager({
 										</label>
 										<Select
 											defaultValue="auto"
-											disabled={isWiping}
+											disabled={isWiping || isOSDrive}
 										>
 											<SelectTrigger>
 												<SelectValue />
@@ -560,7 +580,7 @@ export function DeviceManager({
 						<Separator />
 
 						<div className="flex flex-wrap gap-3">
-							{isNotReady && (
+							{isNotReady && !isOSDrive && (
 								<Button
 									size="lg"
 									variant="destructive"
@@ -574,7 +594,7 @@ export function DeviceManager({
 
 							<Button
 								size="lg"
-								disabled={!isReady}
+								disabled={!isReady || isOSDrive}
 								className="bg-primary hover:bg-primary/90"
 								onClick={handleStartWipe}
 							>
@@ -589,14 +609,14 @@ export function DeviceManager({
 							<Button
 								variant="outline"
 								size="lg"
-								disabled={isWiping}
+								disabled={isWiping || isOSDrive}
 								onClick={handleGenerateCertificate}
 							>
 								<FileText className="h-4 w-4 mr-2" />
 								Generate Certificate
 							</Button>
 
-							{!isReady && (
+							{!isReady && !isOSDrive && (
 								<Button
 									variant="outline"
 									size="lg"

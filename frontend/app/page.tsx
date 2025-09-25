@@ -42,7 +42,11 @@ export default function Dashboard() {
 			const combinedDevices = [
 				...storageWithCategory,
 				...mobileWithCategory,
-			];
+			].sort((a, b) => {
+				if (a.deviceCategory === "storage" && a.isOSDrive) return -1;
+				if (b.deviceCategory === "storage" && b.isOSDrive) return 1;
+				return 0;
+			});
 			setAllDevices(combinedDevices);
 
 			setSelectedDevice((prevSelectedDevice) => {

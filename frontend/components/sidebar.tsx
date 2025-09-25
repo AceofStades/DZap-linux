@@ -5,6 +5,7 @@ import { RefreshCw, HardDrive, Smartphone, UsbIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { TabType } from "@/app/page";
 import type { Device, StorageDevice, MobileDevice } from "@/lib/types";
@@ -120,56 +121,78 @@ export function Sidebar({
 				</div>
 
 				<div className="space-y-2 max-h-[calc(100vh-200px)] overflow-y-auto">
-					{devices.map((device) => (
-						<Card
-							key={device.id}
-							className={cn(
-								"p-4 cursor-pointer transition-all duration-200 hover:shadow-md",
-								getStatusColor(device.status),
-								selectedDevice?.id === device.id &&
-									"ring-2 ring-primary",
-							)}
-							onClick={() => onSelectDevice(device)}
-						>
-							<div className="space-y-2">
-								<div className="flex items-center justify-between">
-									<div className="flex items-center space-x-2">
-										{getDeviceIcon(device.type)}
-										<span className="font-medium text-sm">
-											{device.name}
-										</span>
-									</div>
-									<Badge
-										className={getStatusBadgeColor(
-											device.status,
-										)}
-									>
-										{device.status || "unknown"}
-									</Badge>
-								</div>
-
-								<div className="text-xs text-muted-foreground space-y-1">
-									<div>{device.model}</div>
-									<div className="flex justify-between">
-										<span>{device.type}</span>
-										<span>
-											{device.deviceCategory === "storage"
-												? formatBytes(device.size)
-												: ""}
-										</span>
-									</div>
-								</div>
-
-								{device.status === "wiping" && (
-									<div className="w-full bg-muted rounded-full h-1.5">
-										<div
-											className="bg-warning h-1.5 rounded-full animate-pulse"
-											style={{ width: "45%" }} // This should be dynamic based on wipe progress
-										/>
-									</div>
+					{devices.map((device, index) => (
+						<div key={device.id}>
+							<Card
+								className={cn(
+									"p-4 cursor-pointer transition-all duration-200 hover:shadow-md",
+									{
+										"border-blue-600 bg-blue-600/10 text-blue-600":
+											device.deviceCategory ===
+												"storage" && device.isOSDrive,
+										[getStatusColor(device.status)]:
+											!device.isOSDrive,
+									},
+									selectedDevice?.id === device.id &&
+										"ring-2 ring-primary",
 								)}
-							</div>
-						</Card>
+								onClick={() => onSelectDevice(device)}
+							>
+								<div className="space-y-2">
+									<div className="flex items-center justify-between">
+										<div className="flex items-center space-x-2">
+											{getDeviceIcon(device.type)}
+											<span className="font-medium text-sm">
+												{device.name}
+											</span>
+										</div>
+										<Badge
+											className={cn(
+												device.deviceCategory ===
+													"storage" &&
+													device.isOSDrive
+													? "bg-blue-600/20 text-blue-600"
+													: getStatusBadgeColor(
+															device.status,
+														),
+											)}
+										>
+											{device.deviceCategory ===
+												"storage" && device.isOSDrive
+												? "OS Drive"
+												: device.status || "unknown"}
+										</Badge>
+									</div>
+
+									<div className="text-xs text-muted-foreground space-y-1">
+										<div>{device.model}</div>
+										<div className="flex justify-between">
+											<span>{device.type}</span>
+											<span>
+												{device.deviceCategory ===
+												"storage"
+													? formatBytes(device.size)
+													: ""}
+											</span>
+										</div>
+									</div>
+
+									{device.status === "wiping" && (
+										<div className="w-full bg-muted rounded-full h-1.5">
+											<div
+												className="bg-warning h-1.5 rounded-full animate-pulse"
+												style={{ width: "45%" }} // This should be dynamic based on wipe progress
+											/>
+										</div>
+									)}
+								</div>
+							</Card>
+							{device.deviceCategory === "storage" &&
+								device.isOSDrive &&
+								index < devices.length - 1 && (
+									<Separator className="my-2" />
+								)}
+						</div>
 					))}
 				</div>
 			</div>

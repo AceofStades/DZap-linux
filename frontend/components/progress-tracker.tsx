@@ -25,7 +25,7 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
-import { useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 
 interface WipeJob {
 	id: string;
@@ -50,79 +50,99 @@ interface LogEntry {
 }
 
 export function ProgressTracker() {
-	const [jobs, setJobs] = useState<WipeJob[]>([]);
+	const [jobs, setJobs] = useState<Map<string, WipeJob>>(new Map());
 	const [logs, setLogs] = useState<LogEntry[]>([]);
-	const [selectedJob, setSelectedJob] = useState<string | null>(null);
-	const router = useRouter();
+	const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
 	const ws = useRef<WebSocket | null>(null);
+	const searchParams = useSearchParams();
+
+	useEffect(() => {
+		const newJobId = searchParams.get("jobId");
+		if (newJobId && !jobs.has(newJobId)) {
+			const newJob: WipeJob = {
+				id: newJobId,
+				deviceName: newJobId, // Placeholder, update with more info if available
+				deviceModel: "Unknown",
+				method: "Unknown",
+				status: "queued",
+				progress: 0,
+				currentPass: 0,
+				totalPasses: 0,
+				startTime: new Date().toISOString(),
+				estimatedCompletion: "",
+				speed: "0 MB/s",
+			};
+			setJobs(new Map(jobs.set(newJobId, newJob)));
+			if (!selectedJobId) {
+				setSelectedJobId(newJobId);
+			}
+		}
+	}, [searchParams]);
 
 	useEffect(() => {
 		ws.current = new WebSocket("ws://localhost:8080/ws");
 
-		ws.current.onopen = () => {
-			console.log("WebSocket connected");
-			setLogs((prev) => [
-				...prev,
-				{
+		ws.current.onopen = () => console.log("WebSocket connected");
+		ws.current.onclose = () => console.log("WebSocket disconnected");
+
+		ws.current.onmessage = (event) => {
+			try {
+				const data = JSON.parse(event.data);
+
+				// It's a progress update
+				if (data.deviceId) {
+					setJobs((prevJobs) => {
+						const newJobs = new Map(prevJobs);
+						const job = newJobs.get(data.deviceId);
+						if (job) {
+							const updatedJob = {
+								...job,
+								status: "running",
+								progress: data.progress,
+								currentPass: data.currentPass,
+								totalPasses: data.totalPasses,
+								speed: data.speed,
+								estimatedCompletion: data.eta,
+							};
+							newJobs.set(data.deviceId, updatedJob);
+						}
+						return newJobs;
+					});
+				}
+
+				// It's a log message
+				const newLog: LogEntry = {
 					id: Date.now().toString(),
 					timestamp: new Date().toISOString(),
 					level: "info",
-					message: "Connected to wipe progress server.",
-				},
-			]);
-		};
-
-		ws.current.onmessage = (event) => {
-			const message = event.data;
-			const newLog: LogEntry = {
-				id: Date.now().toString(),
-				timestamp: new Date().toISOString(),
-				level: "info",
-				message: message,
-			};
-
-			if (message.startsWith("ERROR:")) {
-				newLog.level = "error";
-			} else if (message.startsWith("SUCCESS:")) {
-				newLog.level = "success";
-			}
-
-			setLogs((prev) => [...prev, newLog]);
-
-			// This is a simplified logic to update job progress.
-			// A more robust implementation would involve job IDs in messages.
-			if (message.includes("%")) {
-				const progressMatch = message.match(/(\d+\.\d+)%/);
-				if (progressMatch && progressMatch[1]) {
-					const progress = parseFloat(progressMatch[1]);
-					setJobs((prevJobs) =>
-						prevJobs.map((job) =>
-							job.status === "running"
-								? { ...job, progress }
-								: job,
-						),
-					);
-				}
-			}
-		};
-
-		ws.current.onclose = () => {
-			console.log("WebSocket disconnected");
-			setLogs((prev) => [
-				...prev,
-				{
+					message: event.data,
+				};
+				setLogs((prev) => [...prev, newLog]);
+			} catch (e) {
+				// Message is not JSON, treat as plain text log
+				const newLog: LogEntry = {
 					id: Date.now().toString(),
 					timestamp: new Date().toISOString(),
-					level: "warning",
-					message: "Disconnected from wipe progress server.",
-				},
-			]);
+					level: event.data.startsWith("ERROR:")
+						? "error"
+						: event.data.startsWith("SUCCESS:")
+							? "success"
+							: "info",
+					message: event.data,
+				};
+				setLogs((prev) => [...prev, newLog]);
+			}
 		};
 
 		return () => {
 			ws.current?.close();
 		};
 	}, []);
+
+	const activeJobs = Array.from(jobs.values());
+	const selectedJobData = selectedJobId ? jobs.get(selectedJobId) : null;
+
+	// ... (rest of the component remains the same, using activeJobs and selectedJobData)
 
 	const getStatusIcon = (status: WipeJob["status"]) => {
 		switch (status) {
@@ -171,9 +191,8 @@ export function ProgressTracker() {
 		return new Date(isoString).toLocaleTimeString();
 	};
 
-	const selectedJobData = jobs.find((job) => job.id === selectedJob);
-	const filteredLogs = selectedJob
-		? logs.filter((log) => log.deviceId === selectedJob)
+	const filteredLogs = selectedJobId
+		? logs.filter((log) => log.deviceId === selectedJobId)
 		: logs;
 
 	const handleExportLogs = () => {
@@ -222,21 +241,21 @@ export function ProgressTracker() {
 								<span>Active Operations</span>
 							</CardTitle>
 							<CardDescription>
-								{jobs.length === 0
+								{activeJobs.length === 0
 									? "No active or recent wipe operations."
 									: "Current and recent wipe operations"}
 							</CardDescription>
 						</CardHeader>
 						<CardContent className="space-y-4">
-							{jobs.map((job) => (
+							{activeJobs.map((job) => (
 								<Card
 									key={job.id}
 									className={cn(
 										"cursor-pointer transition-all duration-200 hover:shadow-md component-border component-border-hover",
-										selectedJob === job.id &&
+										selectedJobId === job.id &&
 											"ring-2 ring-primary",
 									)}
-									onClick={() => setSelectedJob(job.id)}
+									onClick={() => setSelectedJobId(job.id)}
 								>
 									<CardContent className="p-4">
 										<div className="space-y-3">

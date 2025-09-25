@@ -66,6 +66,20 @@ export async function getCertificates() {
 	return response.json();
 }
 
+export async function unmountDevice(devicePath: string) {
+	const response = await fetch(`${API_BASE_URL}/unmount`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ devicePath }),
+	});
+	if (!response.ok) {
+		throw new Error("Failed to unmount device");
+	}
+	return response.json();
+}
+
 export async function generateCertificate(data: {
 	model: string;
 	serial: string;

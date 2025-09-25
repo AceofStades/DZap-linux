@@ -57,6 +57,14 @@ func GetDriveHealthHandler(w http.ResponseWriter, r *http.Request) {
 
 func WipeDriveHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		respondWithError(w, http.StatusMethodNotAllowed, "Invalid request method")
 		return
@@ -210,6 +218,43 @@ type certRequest struct {
 	Serial  string `json:"serial"`
 	Method  string `json:"method"`
 	LogHash string `json:"logHash"`
+}
+
+func UnmountDriveHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		respondWithError(w, http.StatusMethodNotAllowed, "Invalid request method")
+		return
+	}
+
+	var req struct {
+		DevicePath string `json:"devicePath"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("Error decoding unmount request JSON: %v", err)
+		respondWithError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	if err := core.UnmountDevice(req.DevicePath); err != nil {
+		log.Printf("Error unmounting device %s: %v\n", req.DevicePath, err)
+		respondWithError(w, http.StatusInternalServerError, "Failed to unmount device: "+err.Error())
+		return
+	}
+
+	log.Printf("Successfully processed unmount for device %s\n", req.DevicePath)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "Device unmounted successfully"})
 }
 
 func CertificateHandler(w http.ResponseWriter, r *http.Request) {

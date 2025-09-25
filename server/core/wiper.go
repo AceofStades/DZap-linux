@@ -2,12 +2,24 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"time"
 )
+
+type WipeProgress struct {
+	DeviceID    string  `json:"deviceId"`
+	Status      string  `json:"status"`
+	Progress    float64 `json:"progress"`
+	CurrentPass int     `json:"currentPass"`
+	TotalPasses int     `json:"totalPasses"`
+	Speed       string  `json:"speed"` // MB/s
+	ETA         string  `json:"eta"`   // seconds
+	Error       string  `json:"error,omitempty"`
+}
 
 type WipeConfig struct {
 	DevicePath   string
@@ -200,8 +212,25 @@ func overwritePass(path string, pattern byte, passNum int, totalPasses int, prog
 	}
 
 	var written int64
+	startTime := time.Now()
+
 	for written < size {
-		progress <- fmt.Sprintf("Pass %d/%d: %.2f%%", passNum, totalPasses, float64(written)*100/float64(size))
+		elapsed := time.Since(startTime).Seconds()
+		speed := float64(written) / elapsed / 1024 / 1024      // MB/s
+		eta := (float64(size-written) / (speed * 1024 * 1024)) // seconds
+
+		progressMsg := WipeProgress{
+			DeviceID:    path,
+			Status:      fmt.Sprintf("Pass %d/%d", passNum, totalPasses),
+			Progress:    float64(written) * 100 / float64(size),
+			CurrentPass: passNum,
+			TotalPasses: totalPasses,
+			Speed:       fmt.Sprintf("%.2f MB/s", speed),
+			ETA:         fmt.Sprintf("%.0fs", eta),
+		}
+		jsonMsg, _ := json.Marshal(progressMsg)
+		progress <- string(jsonMsg)
+
 		n, err := file.Write(buffer)
 		if err != nil {
 			if err == io.EOF {

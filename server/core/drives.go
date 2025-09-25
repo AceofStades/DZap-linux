@@ -33,6 +33,7 @@ type Drive struct {
 	Type       DriveType   `json:"type"`
 	IsMounted  bool        `json:"isMounted"`
 	IsFrozen   bool        `json:"isFrozen"`
+	IsOSDrive  bool        `json:"isOSDrive"`
 	Partitions []Partition `json:"partitions"`
 }
 
@@ -45,14 +46,15 @@ type MobileDevice struct {
 
 // internal struct for parsing lsblk output
 type lsblkDevice struct {
-	Name       string        `json:"name"`
-	Model      string        `json:"model"`
-	Size       int64         `json:"size"`
-	Rotational bool          `json:"rota"`
-	Type       string        `json:"type"`
-	MountPoint string        `json:"mountpoint"`
-	Children   []lsblkDevice `json:"children"`
-	FsType     string        `json:"fstype"`
+	Name        string        `json:"name"`
+	Model       string        `json:"model"`
+	Size        int64         `json:"size"`
+	Rotational  bool          `json:"rota"`
+	Type        string        `json:"type"`
+	Mountpoints []string      `json:"mountpoints"`
+	Children    []lsblkDevice `json:"children"`
+	FsType      string        `json:"fstype"`
+	Tran        string        `json:"tran"`
 }
 
 type lsblkOutput struct {
@@ -79,7 +81,7 @@ func DetectDevices() (map[string]interface{}, error) {
 }
 
 func detectStorageDrives() ([]Drive, error) {
-	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINT,FSTYPE")
+	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINTS,FSTYPE,TRAN")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("lsblk command failed: %w", err)
@@ -96,11 +98,25 @@ func detectStorageDrives() ([]Drive, error) {
 			continue
 		}
 
-		isMounted := dev.MountPoint != ""
+		isMounted := len(dev.Mountpoints) > 0 && dev.Mountpoints[0] != ""
+		isOSDrive := false
+		for _, mp := range dev.Mountpoints {
+			if mp == "/" {
+				isOSDrive = true
+				break
+			}
+		}
+
 		var partitions []Partition
 		for _, child := range dev.Children {
-			if child.MountPoint != "" {
+			if len(child.Mountpoints) > 0 && child.Mountpoints[0] != "" {
 				isMounted = true
+			}
+			for _, mp := range child.Mountpoints {
+				if mp == "/" {
+					isOSDrive = true
+					break
+				}
 			}
 			partitions = append(partitions, Partition{
 				Name: "/dev/" + child.Name,
@@ -114,9 +130,10 @@ func detectStorageDrives() ([]Drive, error) {
 			Model:      strings.TrimSpace(dev.Model),
 			Size:       strconv.FormatInt(dev.Size, 10),
 			IsMounted:  isMounted,
+			IsOSDrive:  isOSDrive,
 			Partitions: partitions,
 		}
-		drive.determineDriveType(dev.Name, dev.Rotational)
+		drive.determineDriveType(&dev)
 
 		if drive.Type == SSD {
 			frozen, _ := isDriveFrozen(drive.Name)
@@ -127,6 +144,76 @@ func detectStorageDrives() ([]Drive, error) {
 	return drives, nil
 }
 
+func UnmountDevice(devicePath string) error {
+	fmt.Printf("Attempting to unmount device: %s\n", devicePath)
+
+	cmd := exec.Command("lsblk", "-J", "-o", "NAME,MOUNTPOINTS")
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("lsblk command failed: %w", err)
+	}
+
+	var lsblkData lsblkOutput
+	if err := json.Unmarshal(out, &lsblkData); err != nil {
+		return fmt.Errorf("failed to parse lsblk JSON: %w", err)
+	}
+
+	var targetDevice *lsblkDevice
+	for i, dev := range lsblkData.BlockDevices {
+		if "/dev/"+dev.Name == devicePath {
+			targetDevice = &lsblkData.BlockDevices[i]
+			break
+		}
+	}
+
+	if targetDevice == nil {
+		fmt.Printf("Device %s not found in lsblk output\n", devicePath)
+		return fmt.Errorf("device %s not found in lsblk output", devicePath)
+	}
+	fmt.Printf("Found target device: %s\n", targetDevice.Name)
+
+	var unmountErrors []string
+	// Unmount partitions (children)
+	for _, child := range targetDevice.Children {
+		for _, mp := range child.Mountpoints {
+			if mp != "" {
+				fmt.Printf("Attempting to unmount partition %s from %s\n", child.Name, mp)
+				umountCmd := exec.Command("umount", mp)
+				output, err := umountCmd.CombinedOutput()
+				if err != nil {
+					errMsg := fmt.Sprintf("failed to unmount %s: %v. Output: %s", mp, err, string(output))
+					fmt.Println(errMsg)
+					unmountErrors = append(unmountErrors, errMsg)
+				} else {
+					fmt.Printf("Successfully unmounted %s\n", mp)
+				}
+			}
+		}
+	}
+
+	// Unmount the device itself
+	for _, mp := range targetDevice.Mountpoints {
+		if mp != "" {
+			fmt.Printf("Attempting to unmount device %s from %s\n", targetDevice.Name, mp)
+			umountCmd := exec.Command("umount", mp)
+			output, err := umountCmd.CombinedOutput()
+			if err != nil {
+				errMsg := fmt.Sprintf("failed to unmount %s: %v. Output: %s", mp, err, string(output))
+				fmt.Println(errMsg)
+				unmountErrors = append(unmountErrors, errMsg)
+			} else {
+				fmt.Printf("Successfully unmounted %s\n", mp)
+			}
+		}
+	}
+
+	if len(unmountErrors) > 0 {
+		return fmt.Errorf(strings.Join(unmountErrors, "; "))
+	}
+
+	fmt.Printf("Successfully processed unmount request for %s\n", devicePath)
+	return nil
+}
 func detectAndroidDevices() ([]MobileDevice, error) {
 	cmd := exec.Command("adb", "devices")
 	out, err := cmd.Output()
@@ -161,20 +248,16 @@ func detectAndroidDevices() ([]MobileDevice, error) {
 	return devices, nil
 }
 
-func (d *Drive) determineDriveType(name string, isRotational bool) {
-	if strings.HasPrefix(name, "nbd") {
-		d.Type = UNKN
-		return
-	}
-	if strings.HasPrefix(name, "nvme") {
-		d.Type = NVME
-		return
-	}
-	if strings.Contains(strings.ToLower(d.Model), "usb") {
+func (d *Drive) determineDriveType(dev *lsblkDevice) {
+	if dev.Tran == "usb" {
 		d.Type = USB
 		return
 	}
-	if isRotational {
+	if strings.HasPrefix(dev.Name, "nvme") {
+		d.Type = NVME
+		return
+	}
+	if dev.Rotational {
 		d.Type = HDD
 	} else {
 		d.Type = SSD

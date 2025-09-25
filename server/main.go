@@ -33,6 +33,7 @@ func main() {
 	mux.HandleFunc("/api/wipe", api.WipeDriveHandler)
 	mux.HandleFunc("/api/certificates", api.ListCertificatesHandler)
 	mux.HandleFunc("/api/certificate/generate", api.GenerateCertificateHandler)
+	mux.HandleFunc("/api/unmount", api.UnmountDriveHandler)
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		realtime.ServeWs(hub, w, r)
 	})
