@@ -4,8 +4,11 @@ import (
 	"dzap-backend/core"
 	"dzap-backend/realtime"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -109,4 +112,139 @@ func GetWipeMethodsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(methods)
+}
+
+type CertRequest struct {
+	Model  string `json:"model"`
+	Serial string `json:"serial"`
+	Method string `json:"method"`
+}
+
+func GenerateCertificateHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodPost {
+		respondWithError(w, http.StatusMethodNotAllowed, "Invalid request method")
+		return
+	}
+
+	var req CertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// For now, logHash can be a dummy value.
+	logHash := "dummy-hash-for-now"
+
+	cert, err := core.GenerateCertificate(req.Model, req.Serial, req.Method, logHash)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to generate certificate: "+err.Error())
+		return
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not get user config directory: "+err.Error())
+		return
+	}
+	certsDir := filepath.Join(configDir, "DZap", "certificates")
+	if err := os.MkdirAll(certsDir, 0700); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not create certificates directory: "+err.Error())
+		return
+	}
+
+	certFile := filepath.Join(certsDir, fmt.Sprintf("%s-%d.json", cert.Data.DeviceSerial, cert.Data.Timestamp.Unix()))
+
+	certJSON, err := json.MarshalIndent(cert, "", "  ")
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to marshal certificate: "+err.Error())
+		return
+	}
+	if err := os.WriteFile(certFile, certJSON, 0644); err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to save certificate: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(cert)
+}
+
+func ListCertificatesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Could not get user config directory: "+err.Error())
+		return
+	}
+	certsDir := filepath.Join(configDir, "DZap", "certificates")
+
+	files, err := os.ReadDir(certsDir)
+	if err != nil {
+		// If dir doesn't exist, return empty list, not an error
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]core.SignedCertificate{})
+		return
+	}
+
+	var certs []core.SignedCertificate
+	for _, file := range files {
+		if !file.IsDir() && strings.HasSuffix(file.Name(), ".json") {
+			data, err := os.ReadFile(filepath.Join(certsDir, file.Name()))
+			if err != nil {
+				continue // Skip files that can't be read
+			}
+			var cert core.SignedCertificate
+			if err := json.Unmarshal(data, &cert); err == nil {
+				certs = append(certs, cert)
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(certs)
+}
+
+type certRequest struct {
+	Model   string `json:"model"`
+	Serial  string `json:"serial"`
+	Method  string `json:"method"`
+	LogHash string `json:"logHash"`
+}
+
+func CertificateHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if r.Method != http.MethodPost {
+		respondWithError(w, http.StatusMethodNotAllowed, "Invalid request method")
+		return
+	}
+
+	var req certRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondWithError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	// In a real app, the logHash would be more meaningful
+	signedCert, err := core.GenerateCertificate(req.Model, req.Serial, req.Method, "placeholder_hash")
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to generate certificate: "+err.Error())
+		return
+	}
+
+	// Check if user requested PDF format
+	if r.URL.Query().Get("format") == "pdf" {
+		pdfBytes, err := signedCert.GeneratePDF()
+		if err != nil {
+			respondWithError(w, http.StatusInternalServerError, "Failed to generate PDF: "+err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("Content-Disposition", "attachment; filename=certificate.pdf")
+		w.Write(pdfBytes)
+	} else {
+		// Default to JSON
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(signedCert)
+	}
 }

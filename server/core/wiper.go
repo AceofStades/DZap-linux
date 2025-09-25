@@ -17,9 +17,9 @@ type WipeConfig struct {
 }
 
 type WipeMethod struct {
-	ID          string
-	Name        string
-	Description string
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 // GetWipeMethodsForDrive returns NIST-compliant methods for standard storage.
