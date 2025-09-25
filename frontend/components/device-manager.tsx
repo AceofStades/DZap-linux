@@ -127,9 +127,23 @@ export function DeviceManager({
 		onDeviceUpdate();
 	};
 
-	const handleGenerateCertificate = () => {
+	const handleGenerateCertificate = async () => {
+		if (!device) return;
 		console.log("Generating certificate for device:", device?.id);
-		router.push("/?tab=certificates");
+		try {
+			await generateCertificate({
+				model: device.model,
+				serial:
+					device.deviceCategory === "mobile"
+						? device.serial
+						: device.id,
+				method: wipeMethod,
+			});
+			router.push("/?tab=certificates");
+		} catch (error) {
+			console.error("Failed to generate certificate:", error);
+			// TODO: show error toast
+		}
 	};
 
 	const handleStopWipe = () => {

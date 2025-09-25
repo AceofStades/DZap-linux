@@ -57,3 +57,29 @@ export async function getWipeMethods(deviceId: string) {
 	}
 	return response.json();
 }
+
+export async function getCertificates() {
+	const response = await fetch(`${API_BASE_URL}/certificates`);
+	if (!response.ok) {
+		throw new Error("Failed to fetch certificates");
+	}
+	return response.json();
+}
+
+export async function generateCertificate(data: {
+	model: string;
+	serial: string;
+	method: string;
+}) {
+	const response = await fetch(`${API_BASE_URL}/certificate/generate`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(data),
+	});
+	if (!response.ok) {
+		throw new Error("Failed to generate certificate");
+	}
+	return response.json();
+}

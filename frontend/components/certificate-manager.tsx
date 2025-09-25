@@ -118,12 +118,39 @@ const mockCertificates: Certificate[] = [
 	},
 ];
 
+import { getCertificates } from "@/lib/utils";
+
+// ... (keep existing mockCertificates and other code)
+
 export function CertificateManager() {
-	const [certificates] = useState<Certificate[]>(mockCertificates);
+	const [certificates, setCertificates] =
+		useState<Certificate[]>(mockCertificates);
 	const [searchTerm, setSearchTerm] = useState("");
 	const [statusFilter, setStatusFilter] = useState<string>("all");
 	const [selectedCertificate, setSelectedCertificate] =
 		useState<Certificate | null>(null);
+
+	useEffect(() => {
+		const fetchCertificates = async () => {
+			try {
+				const backendCerts = await getCertificates();
+				// Combine mock data with backend data, avoiding duplicates
+				const allCerts = [...mockCertificates];
+				const mockIds = new Set(mockCertificates.map((c) => c.id));
+				backendCerts.forEach((cert: Certificate) => {
+					if (!mockIds.has(cert.id)) {
+						allCerts.push(cert);
+					}
+				});
+				setCertificates(allCerts);
+			} catch (error) {
+				console.error("Failed to fetch certificates:", error);
+				// Keep mock data on error
+				setCertificates(mockCertificates);
+			}
+		};
+		fetchCertificates();
+	}, []);
 
 	const filteredCertificates = certificates.filter((cert) => {
 		const matchesSearch =
