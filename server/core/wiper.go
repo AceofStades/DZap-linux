@@ -28,12 +28,12 @@ func GetWipeMethodsForDrive(drive Drive) []WipeMethod {
 	case NVME:
 		return []WipeMethod{
 			{ID: "nvme_format", Name: "Purge: NVMe Format", Description: "Uses the drive's built-in, high-speed firmware command (NVM Express Format)."},
-			{ID: "overwrite_1_pass", Name: "Clear: Overwrite", Description: "⚠️ Not fully effective for flash media due to wear-leveling and over-provisioning."},
+			{ID: "overwrite_1_pass", Name: "Clear: Overwrite", Description: "Not fully effective for flash media due to wear-leveling and over-provisioning."},
 		}
 	case SSD:
 		return []WipeMethod{
 			{ID: "sata_secure_erase", Name: "Purge: ATA Secure Erase", Description: "Uses the drive's built-in firmware command to reset all memory cells."},
-			{ID: "overwrite_1_pass", Name: "Clear: Overwrite", Description: "⚠️ Not fully effective for flash media due to wear-leveling and over-provisioning."},
+			{ID: "overwrite_1_pass", Name: "Clear: Overwrite", Description: "Not fully effective for flash media due to wear-leveling and over-provisioning."},
 		}
 	case HDD:
 		return []WipeMethod{
@@ -151,7 +151,7 @@ func sanitizeSATA(path string, progress chan<- string) error {
 	return runCommand(ctx, "hdparm", "--user-master", "user", "--security-erase", "dZap", path)
 }
 
-func sanitizeOverwrite(path string, passes int, progress chan<- string) error {
+func overwritePass(path string, pattern byte, passNum int, totalPasses int, progress chan<- string) error {
 	file, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		return fmt.Errorf("failed to open device: %w", err)
@@ -167,32 +167,50 @@ func sanitizeOverwrite(path string, passes int, progress chan<- string) error {
 	}
 
 	buffer := make([]byte, 4*1024*1024) // 4MB buffer
-	for pass := 1; pass <= passes; pass++ {
-		var written int64
-		for written < size {
-			progress <- fmt.Sprintf("Pass %d/%d: %.2f%%", pass, passes, float64(written)*100/float64(size))
-			n, err := file.Write(buffer)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return fmt.Errorf("write error on pass %d: %w", pass, err)
-			}
-			written += int64(n)
-		}
+	for i := range buffer {
+		buffer[i] = pattern
 	}
-	progress <- "Overwrite completed."
+
+	var written int64
+	for written < size {
+		progress <- fmt.Sprintf("Pass %d/%d: %.2f%%", passNum, totalPasses, float64(written)*100/float64(size))
+		n, err := file.Write(buffer)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("write error on pass %d: %w", passNum, err)
+		}
+		written += int64(n)
+	}
 	return nil
 }
 
 func sanitizeOverwriteTwoPass(path string, progress chan<- string) error {
-	// A true two-pass overwrite writes a pattern, then its complement.
-	// This implementation is a simplified simulation for now.
-	progress <- "Executing 2-Pass Overwrite..."
-	err := sanitizeOverwrite(path, 2, progress)
-	if err != nil {
+	progress <- "Executing Pass 1/2 (Pattern: 0x55)..."
+	if err := overwritePass(path, 0x55, 1, 2, progress); err != nil {
 		return err
 	}
+
+	progress <- "Executing Pass 2/2 (Pattern: 0xAA)..."
+	if err := overwritePass(path, 0xAA, 2, 2, progress); err != nil {
+		return err
+	}
+
 	progress <- "2-Pass Overwrite completed."
+	return nil
+}
+
+func sanitizeOverwrite(path string, passes int, progress chan<- string) error {
+	patterns := []byte{0x00, 0xFF, 0x55} // A simple set of patterns for multi-pass
+
+	for i := 1; i <= passes; i++ {
+		pattern := patterns[(i-1)%len(patterns)]
+		progress <- fmt.Sprintf("Executing Pass %d/%d (Pattern: 0x%02X)...", i, passes, pattern)
+		if err := overwritePass(path, pattern, i, passes, progress); err != nil {
+			return err
+		}
+	}
+	progress <- fmt.Sprintf("%d-Pass Overwrite completed.", passes)
 	return nil
 }
