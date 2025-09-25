@@ -14,9 +14,9 @@
     "concurrently": "^8.2.2",
     "cross-env": "^10.0.0",
     "electron": "^31.2.1",
+    "electron-builder": "^24.6.4",
     "electronmon": "^2.0.2",
-    "wait-on": "^7.2.0",
-    "electron-builder": "^24.6.4"
+    "wait-on": "^7.2.0"
   },
   "dependencies": {
     "node-fetch": "^2.7.0",

@@ -25,7 +25,7 @@ func respondWithError(w http.ResponseWriter, code int, message string) {
 func GetDrivesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	drives, err := core.DetectDrives()
+	drives, err := core.DetectDevices()
 	if err != nil {
 		log.Printf("ERROR in GetDrivesHandler: %v", err) // ADDED LOGGING
 		respondWithError(w, http.StatusInternalServerError, "Failed to detect drives: "+err.Error())
@@ -74,7 +74,7 @@ func WipeDriveHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		err := core.SanitizeDrive(config, progressChan)
+		err := core.SanitizeDevice(config, progressChan)
 		if err != nil {
 			log.Printf("ERROR in WipeDriveHandler (sanitization): %v", err) // ADDED LOGGING
 			hub.Broadcast <- []byte("ERROR: " + err.Error())
