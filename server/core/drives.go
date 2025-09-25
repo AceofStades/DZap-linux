@@ -1,4 +1,4 @@
-// dzap-backend/core/detection.go
+// server/core/drives.go
 package core
 
 import (
@@ -29,6 +29,14 @@ type Drive struct {
 	IsFrozen  bool      `json:"isFrozen"`
 }
 
+type MobileDevice struct {
+	Name   string `json:"name"`
+	Model  string `json:"model"`
+	Serial string `json:"serial"`
+	Type   string `json:"type"` // e.g., "Android"
+}
+
+// internal struct for parsing lsblk output
 type lsblkDevice struct {
 	Name       string        `json:"name"`
 	Model      string        `json:"model"`
@@ -43,17 +51,35 @@ type lsblkOutput struct {
 	BlockDevices []lsblkDevice `json:"blockdevices"`
 }
 
-func DetectDrives() ([]Drive, error) {
-	// Add "children" to the JSON output
+// DetectDevices is the main entry point for finding all supported hardware.
+func DetectDevices() (map[string]interface{}, error) {
+	allDevices := make(map[string]interface{})
+
+	storageDrives, err := detectStorageDrives()
+	if err != nil {
+		fmt.Printf("Warning: Could not detect storage drives: %v\n", err)
+	}
+	allDevices["storage"] = storageDrives
+
+	mobileDevices, err := detectAndroidDevices()
+	if err != nil {
+		fmt.Printf("Warning: Could not detect Android devices: %v\n", err)
+	}
+	allDevices["mobile"] = mobileDevices
+
+	return allDevices, nil
+}
+
+func detectStorageDrives() ([]Drive, error) {
 	cmd := exec.Command("lsblk", "-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINT")
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("lsblk failed: %w", err)
+		return nil, fmt.Errorf("lsblk command failed: %w", err)
 	}
 
 	var lsblkData lsblkOutput
 	if err := json.Unmarshal(out, &lsblkData); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse lsblk JSON: %w", err)
 	}
 
 	var drives []Drive
@@ -89,6 +115,40 @@ func DetectDrives() ([]Drive, error) {
 	return drives, nil
 }
 
+func detectAndroidDevices() ([]MobileDevice, error) {
+	cmd := exec.Command("adb", "devices")
+	out, err := cmd.Output()
+	if err != nil {
+		// This is not a fatal error; adb might just not be installed.
+		return []MobileDevice{}, fmt.Errorf("adb command not found or failed: %w", err)
+	}
+
+	lines := strings.Split(string(out), "\n")
+	var devices []MobileDevice
+	// Start from line 1 to skip the "List of devices attached" header
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == "device" {
+			serial := fields[0]
+			modelCmd := exec.Command("adb", "-s", serial, "shell", "getprop", "ro.product.model")
+			modelOut, err := modelCmd.Output()
+			if err != nil {
+				continue // Skip if we can't get the model
+			}
+			model := strings.TrimSpace(string(modelOut))
+
+			devices = append(devices, MobileDevice{
+				Name:   model,
+				Model:  model,
+				Serial: serial,
+				Type:   "Android",
+			})
+		}
+	}
+
+	return devices, nil
+}
+
 func (d *Drive) determineDriveType(name string, isRotational bool) {
 	if strings.HasPrefix(name, "nbd") {
 		d.Type = UNKN
@@ -109,7 +169,6 @@ func (d *Drive) determineDriveType(name string, isRotational bool) {
 	}
 }
 
-// isDriveFrozen checks the output of hdparm for the "frozen" state.
 func isDriveFrozen(devicePath string) (bool, error) {
 	cmd := exec.Command("hdparm", "-I", devicePath)
 	var out bytes.Buffer
