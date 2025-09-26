@@ -20,6 +20,7 @@ Dependencies:
 ```
 util-linux
 smartmontools
+android-tools
 ```
 
 Node Dependencies:
