@@ -15,3 +15,14 @@ To run frontend open a new terminal:
 ```
 npm run start:frontend
 ```
+
+Dependencies:
+```
+util-linux
+smartmontools
+```
+
+Node Dependencies:
+```
+npm install cross-env --save-dev
+```
