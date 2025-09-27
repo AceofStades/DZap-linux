@@ -254,7 +254,13 @@ func sanitizeOverwriteTwoPass(path string, progress chan<- string) error {
 		return err
 	}
 
-	progress <- "2-Pass Overwrite completed."
+	completion := WipeProgress{
+		DeviceID: path,
+		Status:   "done",
+		Progress: 100,
+	}
+	jsonMsg, _ := json.Marshal(completion)
+	progress <- string(jsonMsg)
 	return nil
 }
 
@@ -268,6 +274,12 @@ func sanitizeOverwrite(path string, passes int, progress chan<- string) error {
 			return err
 		}
 	}
-	progress <- fmt.Sprintf("%d-Pass Overwrite completed.", passes)
+	completion := WipeProgress{
+		DeviceID: path,
+		Status:   "done",
+		Progress: 100,
+	}
+	jsonMsg, _ := json.Marshal(completion)
+	progress <- string(jsonMsg)
 	return nil
 }

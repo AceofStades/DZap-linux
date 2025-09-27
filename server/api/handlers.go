@@ -90,7 +90,11 @@ func WipeDriveHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("ERROR in WipeDriveHandler (sanitization): %v", err) // ADDED LOGGING
 			hub.Broadcast <- []byte("ERROR: " + err.Error())
 		} else {
-			hub.Broadcast <- []byte("SUCCESS: Drive sanitization finished.")
+			doneMsg, _ := json.Marshal(map[string]string{
+				"status":   "done",
+				"deviceId": config.DevicePath,
+			})
+			hub.Broadcast <- doneMsg
 		}
 	}()
 

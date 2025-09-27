@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -145,7 +146,7 @@ func detectStorageDrives() ([]Drive, error) {
 }
 
 func UnmountDevice(devicePath string) error {
-	fmt.Printf("Attempting to unmount device: %s\n", devicePath)
+	log.Printf("Attempting to unmount device: %s", devicePath)
 
 	cmd := exec.Command("lsblk", "-J", "-o", "NAME,MOUNTPOINTS")
 	out, err := cmd.Output()
@@ -167,25 +168,23 @@ func UnmountDevice(devicePath string) error {
 	}
 
 	if targetDevice == nil {
-		fmt.Printf("Device %s not found in lsblk output\n", devicePath)
 		return fmt.Errorf("device %s not found in lsblk output", devicePath)
 	}
-	fmt.Printf("Found target device: %s\n", targetDevice.Name)
 
 	var unmountErrors []string
 	// Unmount partitions (children)
 	for _, child := range targetDevice.Children {
 		for _, mp := range child.Mountpoints {
 			if mp != "" {
-				fmt.Printf("Attempting to unmount partition %s from %s\n", child.Name, mp)
+				log.Printf("Attempting to unmount partition %s from %s", child.Name, mp)
 				umountCmd := exec.Command("umount", mp)
 				output, err := umountCmd.CombinedOutput()
 				if err != nil {
 					errMsg := fmt.Sprintf("failed to unmount %s: %v. Output: %s", mp, err, string(output))
-					fmt.Println(errMsg)
+					log.Println(errMsg)
 					unmountErrors = append(unmountErrors, errMsg)
 				} else {
-					fmt.Printf("Successfully unmounted %s\n", mp)
+					log.Printf("Successfully unmounted %s", mp)
 				}
 			}
 		}
@@ -194,15 +193,15 @@ func UnmountDevice(devicePath string) error {
 	// Unmount the device itself
 	for _, mp := range targetDevice.Mountpoints {
 		if mp != "" {
-			fmt.Printf("Attempting to unmount device %s from %s\n", targetDevice.Name, mp)
+			log.Printf("Attempting to unmount device %s from %s", targetDevice.Name, mp)
 			umountCmd := exec.Command("umount", mp)
 			output, err := umountCmd.CombinedOutput()
 			if err != nil {
 				errMsg := fmt.Sprintf("failed to unmount %s: %v. Output: %s", mp, err, string(output))
-				fmt.Println(errMsg)
+				log.Println(errMsg)
 				unmountErrors = append(unmountErrors, errMsg)
 			} else {
-				fmt.Printf("Successfully unmounted %s\n", mp)
+				log.Printf("Successfully unmounted %s", mp)
 			}
 		}
 	}
@@ -211,7 +210,7 @@ func UnmountDevice(devicePath string) error {
 		return fmt.Errorf(strings.Join(unmountErrors, "; "))
 	}
 
-	fmt.Printf("Successfully processed unmount request for %s\n", devicePath)
+	log.Printf("Successfully processed unmount request for %s", devicePath)
 	return nil
 }
 func detectAndroidDevices() ([]MobileDevice, error) {
