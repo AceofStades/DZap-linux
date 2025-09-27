@@ -26,6 +26,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { useSearchParams } from "next/navigation";
+import { pauseWipe, abortWipe } from "@/lib/utils";
 
 interface WipeJob {
 	id: string;
@@ -39,6 +40,7 @@ interface WipeJob {
 	startTime: string;
 	estimatedCompletion: string;
 	speed: string;
+	sectorNumber: number;
 }
 
 interface LogEntry {
@@ -47,6 +49,7 @@ interface LogEntry {
 	level: "info" | "warning" | "error" | "success";
 	message: string;
 	deviceId?: string;
+	sectorNumber?: number;
 }
 
 export function ProgressTracker() {
@@ -195,6 +198,30 @@ export function ProgressTracker() {
 		? logs.filter((log) => log.deviceId === selectedJobId)
 		: logs;
 
+	const handlePauseWipe = async () => {
+		if (selectedJobId) {
+			try {
+				await pauseWipe(selectedJobId);
+				// Optionally, update job status locally for immediate feedback
+			} catch (error) {
+				console.error("Failed to pause wipe:", error);
+				// TODO: Show error toast
+			}
+		}
+	};
+
+	const handleAbortWipe = async () => {
+		if (selectedJobId) {
+			try {
+				await abortWipe(selectedJobId);
+				// Optionally, update job status locally for immediate feedback
+			} catch (error) {
+				console.error("Failed to abort wipe:", error);
+				// TODO: Show error toast
+			}
+		}
+	};
+
 	const handleExportLogs = () => {
 		const logData = filteredLogs.map((log) => ({
 			timestamp: log.timestamp,
@@ -334,6 +361,40 @@ export function ProgressTracker() {
 														{job.speed}
 													</span>
 												</div>
+												<div>
+													<span className="text-muted-foreground">
+														ETA:
+													</span>
+													<span className="ml-2 font-medium">
+														{
+															job.estimatedCompletion
+														}
+													</span>
+												</div>{" "}
+											</div>
+											<div className="flex space-x-2">
+												<Button
+													variant="outline"
+													size="sm"
+													onClick={handlePauseWipe}
+													disabled={
+														job.status !== "running"
+													}
+												>
+													<Pause className="h-4 w-4 mr-2" />
+													Pause
+												</Button>
+												<Button
+													variant="destructive"
+													size="sm"
+													onClick={handleAbortWipe}
+													disabled={
+														job.status !== "running"
+													}
+												>
+													<Square className="h-4 w-4 mr-2" />
+													Abort
+												</Button>
 											</div>
 										</div>
 									</CardContent>

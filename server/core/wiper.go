@@ -11,14 +11,15 @@ import (
 )
 
 type WipeProgress struct {
-	DeviceID    string  `json:"deviceId"`
-	Status      string  `json:"status"`
-	Progress    float64 `json:"progress"`
-	CurrentPass int     `json:"currentPass"`
-	TotalPasses int     `json:"totalPasses"`
-	Speed       string  `json:"speed"` // MB/s
-	ETA         string  `json:"eta"`   // seconds
-	Error       string  `json:"error,omitempty"`
+	DeviceID     string  `json:"deviceId"`
+	Status       string  `json:"status"`
+	Progress     float64 `json:"progress"`
+	CurrentPass  int     `json:"currentPass"`
+	TotalPasses  int     `json:"totalPasses"`
+	Speed        string  `json:"speed"` // MB/s
+	ETA          string  `json:"eta"`   // seconds
+	Error        string  `json:"error,omitempty"`
+	SectorNumber int64   `json:"sectorNumber"`
 }
 
 type WipeConfig struct {
@@ -220,13 +221,14 @@ func overwritePass(path string, pattern byte, passNum int, totalPasses int, prog
 		eta := (float64(size-written) / (speed * 1024 * 1024)) // seconds
 
 		progressMsg := WipeProgress{
-			DeviceID:    path,
-			Status:      fmt.Sprintf("Pass %d/%d", passNum, totalPasses),
-			Progress:    float64(written) * 100 / float64(size),
-			CurrentPass: passNum,
-			TotalPasses: totalPasses,
-			Speed:       fmt.Sprintf("%.2f MB/s", speed),
-			ETA:         fmt.Sprintf("%.0fs", eta),
+			DeviceID:     path,
+			Status:       fmt.Sprintf("Pass %d/%d", passNum, totalPasses),
+			Progress:     float64(written) * 100 / float64(size),
+			CurrentPass:  passNum,
+			TotalPasses:  totalPasses,
+			Speed:        fmt.Sprintf("%.2f MB/s", speed),
+			ETA:          fmt.Sprintf("%.0fs", eta),
+			SectorNumber: written,
 		}
 		jsonMsg, _ := json.Marshal(progressMsg)
 		progress <- string(jsonMsg)
@@ -240,6 +242,16 @@ func overwritePass(path string, pattern byte, passNum int, totalPasses int, prog
 		}
 		written += int64(n)
 	}
+	return nil
+}
+
+func PauseWipe(deviceId string) error {
+	// This is a placeholder.
+	return nil
+}
+
+func AbortWipe(deviceId string) error {
+	// This is a placeholder.
 	return nil
 }
 

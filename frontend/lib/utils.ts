@@ -80,6 +80,34 @@ export async function unmountDevice(devicePath: string) {
 	return response.json();
 }
 
+export async function pauseWipe(deviceId: string) {
+	const response = await fetch(`${API_BASE_URL}/wipe/pause`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ deviceId }),
+	});
+	if (!response.ok) {
+		throw new Error("Failed to pause wipe");
+	}
+	return response.json();
+}
+
+export async function abortWipe(deviceId: string) {
+	const response = await fetch(`${API_BASE_URL}/wipe/abort`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify({ deviceId }),
+	});
+	if (!response.ok) {
+		throw new Error("Failed to abort wipe");
+	}
+	return response.json();
+}
+
 export async function generateCertificate(data: {
 	model: string;
 	serial: string;

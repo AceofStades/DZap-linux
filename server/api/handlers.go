@@ -96,6 +96,7 @@ func WipeDriveHandler(w http.ResponseWriter, r *http.Request) {
 			})
 			hub.Broadcast <- doneMsg
 		}
+		close(progressChan)
 	}()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -133,53 +134,54 @@ type CertRequest struct {
 }
 
 func GenerateCertificateHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	if r.Method != http.MethodPost {
-		respondWithError(w, http.StatusMethodNotAllowed, "Invalid request method")
+	// This is a placeholder.
+	var data map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	var req CertRequest
+	// For now, just log the data.
+	fmt.Printf("Received data for certificate generation: %+v\n", data)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Certificate generation request received"})
+}
+
+func PauseWipeHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DeviceID string `json:"deviceId"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondWithError(w, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// For now, logHash can be a dummy value.
-	logHash := "dummy-hash-for-now"
-
-	cert, err := core.GenerateCertificate(req.Model, req.Serial, req.Method, logHash)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to generate certificate: "+err.Error())
+	if err := core.PauseWipe(req.DeviceID); err != nil {
+		http.Error(w, "Failed to pause wipe: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Could not get user config directory: "+err.Error())
-		return
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Wipe pause request received"})
+}
+
+func AbortWipeHandler(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DeviceID string `json:"deviceId"`
 	}
-	certsDir := filepath.Join(configDir, "DZap", "certificates")
-	if err := os.MkdirAll(certsDir, 0700); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Could not create certificates directory: "+err.Error())
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	certFile := filepath.Join(certsDir, fmt.Sprintf("%s-%d.json", cert.Data.DeviceSerial, cert.Data.Timestamp.Unix()))
-
-	certJSON, err := json.MarshalIndent(cert, "", "  ")
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to marshal certificate: "+err.Error())
-		return
-	}
-	if err := os.WriteFile(certFile, certJSON, 0644); err != nil {
-		respondWithError(w, http.StatusInternalServerError, "Failed to save certificate: "+err.Error())
+	if err := core.AbortWipe(req.DeviceID); err != nil {
+		http.Error(w, "Failed to abort wipe: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(cert)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Wipe abort request received"})
 }
 
 func ListCertificatesHandler(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +242,7 @@ func UnmountDriveHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		DevicePath string `json:"devicePath"`
+		Device string `json:"device"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -249,13 +251,13 @@ func UnmountDriveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := core.UnmountDevice(req.DevicePath); err != nil {
-		log.Printf("Error unmounting device %s: %v\n", req.DevicePath, err)
+	if err := core.UnmountDevice(req.Device); err != nil {
+		log.Printf("Error unmounting device %s: %v\n", req.Device, err)
 		respondWithError(w, http.StatusInternalServerError, "Failed to unmount device: "+err.Error())
 		return
 	}
 
-	log.Printf("Successfully processed unmount for device %s\n", req.DevicePath)
+	log.Printf("Successfully processed unmount for device %s\n", req.Device)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "Device unmounted successfully"})

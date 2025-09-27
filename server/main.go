@@ -30,10 +30,12 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/drives", api.GetDrivesHandler)
-	mux.HandleFunc("/api/wipe", api.WipeDriveHandler)
+	mux.HandleFunc("/api/wipe/pause", api.PauseWipeHandler)
+	mux.HandleFunc("/api/wipe/abort", api.AbortWipeHandler)
 	mux.HandleFunc("/api/certificates", api.ListCertificatesHandler)
 	mux.HandleFunc("/api/certificate/generate", api.GenerateCertificateHandler)
 	mux.HandleFunc("/api/unmount", api.UnmountDriveHandler)
+	mux.HandleFunc("/api/wipe", api.WipeDriveHandler)
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		realtime.ServeWs(hub, w, r)
 	})
