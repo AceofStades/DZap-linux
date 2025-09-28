@@ -248,6 +248,10 @@ func detectAndroidDevices() ([]MobileDevice, error) {
 }
 
 func (d *Drive) determineDriveType(dev *lsblkDevice) {
+	if strings.HasPrefix(dev.Name, "nbd") {
+		d.Type = HDD
+		return
+	}
 	if dev.Tran == "usb" {
 		d.Type = USB
 		return

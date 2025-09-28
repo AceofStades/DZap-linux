@@ -72,7 +72,7 @@ export async function unmountDevice(devicePath: string) {
 		headers: {
 			"Content-Type": "application/json",
 		},
-		body: JSON.stringify({ devicePath }),
+		body: JSON.stringify({ device: devicePath }),
 	});
 	if (!response.ok) {
 		throw new Error("Failed to unmount device");

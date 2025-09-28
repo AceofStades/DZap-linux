@@ -129,7 +129,7 @@ export function DeviceManager({
 		}
 	};
 
-	const handleMountDevice = async () => {
+	const handleUnmountDevice = async () => {
 		if (!device) return;
 		console.log("Unmounting device:", device?.id);
 		try {
@@ -584,7 +584,7 @@ export function DeviceManager({
 								<Button
 									size="lg"
 									variant="destructive"
-									onClick={handleMountDevice}
+									onClick={handleUnmountDevice}
 									className="bg-red-600 hover:bg-red-700"
 								>
 									<HardDrive className="h-4 w-4 mr-2" />

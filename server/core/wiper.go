@@ -5,13 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"strings"
+	"sync"
 	"time"
+)
+
+// WipeControls holds the channels for controlling a wipe process.
+type WipeControls struct {
+	cancel context.CancelFunc
+	pause  chan bool
+	paused bool
+}
+
+var (
+	activeWipes = make(map[string]*WipeControls)
+	wipeMutex   = &sync.Mutex{}
 )
 
 type WipeProgress struct {
 	DeviceID     string  `json:"deviceId"`
+	Method       string  `json:"method"`
 	Status       string  `json:"status"`
 	Progress     float64 `json:"progress"`
 	CurrentPass  int     `json:"currentPass"`
@@ -103,8 +119,6 @@ func GetWipeMethods(devicePath string) ([]WipeMethod, error) {
 }
 
 func SanitizeDevice(config WipeConfig, progress chan<- string) error {
-	defer close(progress)
-
 	if config.DeviceType == "Android" {
 		return sanitizeAndroid(config.DeviceSerial, progress)
 	}
@@ -141,11 +155,11 @@ func sanitizeStorageDrive(config WipeConfig, progress chan<- string) error {
 	case "sata_secure_erase":
 		return sanitizeSATA(config.DevicePath, progress)
 	case "overwrite_1_pass":
-		return sanitizeOverwrite(config.DevicePath, 1, progress)
+		return sanitizeOverwrite(config, 1, progress)
 	case "overwrite_3_pass":
-		return sanitizeOverwrite(config.DevicePath, 3, progress)
+		return sanitizeOverwrite(config, 3, progress)
 	case "overwrite_2_pass":
-		return sanitizeOverwriteTwoPass(config.DevicePath, progress)
+		return sanitizeOverwriteTwoPass(config, progress)
 	default:
 		return fmt.Errorf("unknown sanitization method: %s", config.Method)
 	}
@@ -163,7 +177,9 @@ func sanitizeAndroid(serial string, progress chan<- string) error {
 }
 
 func runCommand(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	// Prepend ionice to the command to set I/O scheduling class to Idle
+	fullArgs := append([]string{"-c", "3", name}, args...)
+	cmd := exec.CommandContext(ctx, "ionice", fullArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("command %s failed: %w. Output: %s", name, err, string(output))
@@ -192,8 +208,8 @@ func sanitizeSATA(path string, progress chan<- string) error {
 	return runCommand(ctx, "hdparm", "--user-master", "user", "--security-erase", "dZap", path)
 }
 
-func overwritePass(path string, pattern byte, passNum int, totalPasses int, progress chan<- string) error {
-	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+func overwritePass(ctx context.Context, controls *WipeControls, config WipeConfig, pattern byte, passNum int, totalPasses int, progress chan<- string) error {
+	file, err := os.OpenFile(config.DevicePath, os.O_WRONLY, 0)
 	if err != nil {
 		return fmt.Errorf("failed to open device: %w", err)
 	}
@@ -203,11 +219,12 @@ func overwritePass(path string, pattern byte, passNum int, totalPasses int, prog
 	if err != nil {
 		return fmt.Errorf("could not determine device size: %w", err)
 	}
+	log.Printf("overwritePass pass %d, device size: %d", passNum, size)
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("could not seek to start: %w", err)
 	}
 
-	buffer := make([]byte, 4*1024*1024) // 4MB buffer
+	buffer := make([]byte, 1*1024*1024) // 1MB buffer
 	for i := range buffer {
 		buffer[i] = pattern
 	}
@@ -215,59 +232,136 @@ func overwritePass(path string, pattern byte, passNum int, totalPasses int, prog
 	var written int64
 	startTime := time.Now()
 
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
 	for written < size {
-		elapsed := time.Since(startTime).Seconds()
-		speed := float64(written) / elapsed / 1024 / 1024      // MB/s
-		eta := (float64(size-written) / (speed * 1024 * 1024)) // seconds
-
-		progressMsg := WipeProgress{
-			DeviceID:     path,
-			Status:       fmt.Sprintf("Pass %d/%d", passNum, totalPasses),
-			Progress:     float64(written) * 100 / float64(size),
-			CurrentPass:  passNum,
-			TotalPasses:  totalPasses,
-			Speed:        fmt.Sprintf("%.2f MB/s", speed),
-			ETA:          fmt.Sprintf("%.0fs", eta),
-			SectorNumber: written,
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case paused := <-controls.pause:
+			if paused {
+				// Paused: wait for resume signal
+				<-controls.pause
+			}
+		default:
 		}
-		jsonMsg, _ := json.Marshal(progressMsg)
-		progress <- string(jsonMsg)
 
+		time.Sleep(10 * time.Millisecond) // Add a small delay to reduce I/O pressure
 		n, err := file.Write(buffer)
 		if err != nil {
-			if err == io.EOF {
+			log.Printf("overwritePass pass %d, write error: %v", passNum, err)
+			if err == io.EOF || (err != nil && strings.Contains(err.Error(), "no space left on device")) {
 				break
 			}
 			return fmt.Errorf("write error on pass %d: %w", passNum, err)
 		}
 		written += int64(n)
-	}
-	return nil
-}
 
-func PauseWipe(deviceId string) error {
-	// This is a placeholder.
+		select {
+		case <-ticker.C:
+			elapsed := time.Since(startTime).Seconds()
+			speed := float64(written) / elapsed / 1024 / 1024      // MB/s
+			eta := (float64(size-written) / (speed * 1024 * 1024)) // seconds
+
+			// Correct progress calculation
+			passProgress := float64(written) * 100 / float64(size)
+			overallProgress := (float64(passNum-1) + passProgress/100) * 100 / float64(totalPasses)
+
+			progressMsg := WipeProgress{
+				DeviceID:     config.DevicePath,
+				Method:       config.Method,
+				Status:       fmt.Sprintf("Pass %d/%d", passNum, totalPasses),
+				Progress:     overallProgress,
+				CurrentPass:  passNum,
+				TotalPasses:  totalPasses,
+				Speed:        fmt.Sprintf("%.2f MB/s", speed),
+				ETA:          fmt.Sprintf("%.0fs", eta),
+				SectorNumber: written,
+			}
+			jsonMsg, _ := json.Marshal(progressMsg)
+			progress <- string(jsonMsg)
+
+		default:
+		}
+	}
+
+	// Final progress update for the pass
+	finalProgress := (float64(passNum) * 100) / float64(totalPasses)
+	progressMsg := WipeProgress{
+		DeviceID:     config.DevicePath,
+		Method:       config.Method,
+		Status:       fmt.Sprintf("Pass %d/%d complete", passNum, totalPasses),
+		Progress:     finalProgress,
+		CurrentPass:  passNum,
+		TotalPasses:  totalPasses,
+		SectorNumber: written,
+	}
+	jsonMsg, _ := json.Marshal(progressMsg)
+	progress <- string(jsonMsg)
+
 	return nil
 }
 
 func AbortWipe(deviceId string) error {
-	// This is a placeholder.
+	wipeMutex.Lock()
+	defer wipeMutex.Unlock()
+
+	controls, ok := activeWipes[deviceId]
+	if !ok {
+		return fmt.Errorf("no active wipe found for device %s", deviceId)
+	}
+
+	controls.cancel()
+	delete(activeWipes, deviceId)
 	return nil
 }
 
-func sanitizeOverwriteTwoPass(path string, progress chan<- string) error {
+func PauseWipe(deviceId string) error {
+	wipeMutex.Lock()
+	defer wipeMutex.Unlock()
+
+	controls, ok := activeWipes[deviceId]
+	if !ok {
+		return fmt.Errorf("no active wipe found for device %s", deviceId)
+	}
+
+	controls.paused = !controls.paused
+	controls.pause <- controls.paused
+	return nil
+}
+
+func sanitizeOverwriteTwoPass(config WipeConfig, progress chan<- string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	controls := &WipeControls{
+		cancel: cancel,
+		pause:  make(chan bool),
+	}
+	wipeMutex.Lock()
+	activeWipes[config.DevicePath] = controls
+	wipeMutex.Unlock()
+
+	defer func() {
+		wipeMutex.Lock()
+		delete(activeWipes, config.DevicePath)
+		wipeMutex.Unlock()
+	}()
 	progress <- "Executing Pass 1/2 (Pattern: 0x55)..."
-	if err := overwritePass(path, 0x55, 1, 2, progress); err != nil {
+	if err := overwritePass(ctx, controls, config, 0x55, 1, 2, progress); err != nil {
 		return err
 	}
 
+	log.Println("First pass complete, starting second pass.")
+
 	progress <- "Executing Pass 2/2 (Pattern: 0xAA)..."
-	if err := overwritePass(path, 0xAA, 2, 2, progress); err != nil {
+	if err := overwritePass(ctx, controls, config, 0xAA, 2, 2, progress); err != nil {
 		return err
 	}
 
 	completion := WipeProgress{
-		DeviceID: path,
+		DeviceID: config.DevicePath,
 		Status:   "done",
 		Progress: 100,
 	}
@@ -276,18 +370,34 @@ func sanitizeOverwriteTwoPass(path string, progress chan<- string) error {
 	return nil
 }
 
-func sanitizeOverwrite(path string, passes int, progress chan<- string) error {
+func sanitizeOverwrite(config WipeConfig, passes int, progress chan<- string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	controls := &WipeControls{
+		cancel: cancel,
+		pause:  make(chan bool),
+	}
+	wipeMutex.Lock()
+	activeWipes[config.DevicePath] = controls
+	wipeMutex.Unlock()
+
+	defer func() {
+		wipeMutex.Lock()
+		delete(activeWipes, config.DevicePath)
+		wipeMutex.Unlock()
+	}()
 	patterns := []byte{0x00, 0xFF, 0x55} // A simple set of patterns for multi-pass
 
 	for i := 1; i <= passes; i++ {
 		pattern := patterns[(i-1)%len(patterns)]
 		progress <- fmt.Sprintf("Executing Pass %d/%d (Pattern: 0x%02X)...", i, passes, pattern)
-		if err := overwritePass(path, pattern, i, passes, progress); err != nil {
+		if err := overwritePass(ctx, controls, config, pattern, i, passes, progress); err != nil {
 			return err
 		}
 	}
 	completion := WipeProgress{
-		DeviceID: path,
+		DeviceID: config.DevicePath,
 		Status:   "done",
 		Progress: 100,
 	}

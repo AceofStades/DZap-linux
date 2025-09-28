@@ -1,32 +1,32 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { useSearchParams } from "next/navigation";
 import {
 	Play,
 	Pause,
-	Square,
-	Download,
-	Trash2,
-	AlertCircle,
 	CheckCircle,
+	AlertCircle,
 	Clock,
 	Terminal,
+	Square,
+	Trash2,
+	Download,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button } from "./ui/button";
 import {
 	Card,
 	CardContent,
 	CardDescription,
 	CardHeader,
 	CardTitle,
-} from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
+} from "./ui/card";
+import { Badge } from "./ui/badge";
+import { Progress } from "./ui/progress";
+import { Separator } from "./ui/separator";
+import { ScrollArea } from "./ui/scroll-area";
 import { cn } from "@/lib/utils";
-import { useSearchParams } from "next/navigation";
-import { pauseWipe, abortWipe } from "@/lib/utils";
+import { abortWipe } from "@/lib/utils";
 
 interface WipeJob {
 	id: string;
@@ -198,27 +198,13 @@ export function ProgressTracker() {
 		? logs.filter((log) => log.deviceId === selectedJobId)
 		: logs;
 
-	const handlePauseWipe = async () => {
-		if (selectedJobId) {
-			try {
-				await pauseWipe(selectedJobId);
-				// Optionally, update job status locally for immediate feedback
-			} catch (error) {
-				console.error("Failed to pause wipe:", error);
-				// TODO: Show error toast
-			}
-		}
-	};
-
-	const handleAbortWipe = async () => {
-		if (selectedJobId) {
-			try {
-				await abortWipe(selectedJobId);
-				// Optionally, update job status locally for immediate feedback
-			} catch (error) {
-				console.error("Failed to abort wipe:", error);
-				// TODO: Show error toast
-			}
+	const handleAbortWipe = async (jobId: string) => {
+		try {
+			await abortWipe(jobId);
+			// Optionally, update job status locally for immediate feedback
+		} catch (error) {
+			console.error("Failed to abort wipe:", error);
+			// TODO: Show error toast
 		}
 	};
 
@@ -278,7 +264,7 @@ export function ProgressTracker() {
 								<Card
 									key={job.id}
 									className={cn(
-										"cursor-pointer transition-all duration-200 hover:shadow-md component-border component-border-hover",
+										"transition-all duration-200 hover:shadow-md component-border component-border-hover",
 										selectedJobId === job.id &&
 											"ring-2 ring-primary",
 									)}
@@ -298,13 +284,30 @@ export function ProgressTracker() {
 														</p>
 													</div>
 												</div>
-												<Badge
-													className={getStatusColor(
-														job.status,
+												<div className="flex items-center space-x-2">
+													<Badge
+														className={getStatusColor(
+															job.status,
+														)}
+													>
+														{job.status.toUpperCase()}
+													</Badge>
+													{job.status ===
+														"running" && (
+														<Button
+															variant="destructive"
+															size="sm"
+															onClick={() =>
+																handleAbortWipe(
+																	job.id,
+																)
+															}
+														>
+															<Square className="h-4 w-4 mr-2" />
+															Abort
+														</Button>
 													)}
-												>
-													{job.status.toUpperCase()}
-												</Badge>
+												</div>{" "}
 											</div>
 
 											<div className="space-y-2">
@@ -371,30 +374,6 @@ export function ProgressTracker() {
 														}
 													</span>
 												</div>{" "}
-											</div>
-											<div className="flex space-x-2">
-												<Button
-													variant="outline"
-													size="sm"
-													onClick={handlePauseWipe}
-													disabled={
-														job.status !== "running"
-													}
-												>
-													<Pause className="h-4 w-4 mr-2" />
-													Pause
-												</Button>
-												<Button
-													variant="destructive"
-													size="sm"
-													onClick={handleAbortWipe}
-													disabled={
-														job.status !== "running"
-													}
-												>
-													<Square className="h-4 w-4 mr-2" />
-													Abort
-												</Button>
 											</div>
 										</div>
 									</CardContent>
