@@ -118,6 +118,7 @@ export function DeviceManager({
 						? device.serial
 						: (device as StorageDevice).name, // Backend needs a serial, using name for now.
 				DeviceType: device.type,
+				DeviceModel: device.model,
 			});
 			setShowConfirmation(false);
 			router.push(

@@ -29,6 +29,7 @@ export async function startWipe(config: {
 	Method: string;
 	DeviceSerial: string;
 	DeviceType: string;
+	DeviceModel: string;
 }) {
 	const response = await fetch(`${API_BASE_URL}/wipe`, {
 		method: "POST",

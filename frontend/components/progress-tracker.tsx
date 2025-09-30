@@ -106,6 +106,9 @@ export function ProgressTracker() {
 								totalPasses: data.totalPasses,
 								speed: data.speed,
 								estimatedCompletion: data.eta,
+								deviceModel:
+									data.deviceModel || job.deviceModel,
+								method: data.methodName || job.method,
 							};
 							newJobs.set(data.deviceId, updatedJob);
 						}

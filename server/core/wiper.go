@@ -27,7 +27,9 @@ var (
 
 type WipeProgress struct {
 	DeviceID     string  `json:"deviceId"`
+	DeviceModel  string  `json:"deviceModel,omitempty"`
 	Method       string  `json:"method"`
+	MethodName   string  `json:"methodName,omitempty"`
 	Status       string  `json:"status"`
 	Progress     float64 `json:"progress"`
 	CurrentPass  int     `json:"currentPass"`
@@ -43,12 +45,29 @@ type WipeConfig struct {
 	Method       string
 	DeviceSerial string
 	DeviceType   string
+	DeviceModel  string `json:"deviceModel,omitempty"`
 }
 
 type WipeMethod struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+}
+
+var wipeMethodNames = map[string]string{
+	"nvme_format":           "Purge: NVMe Format",
+	"overwrite_1_pass":      "Clear: 1-Pass Overwrite",
+	"sata_secure_erase":     "Purge: ATA Secure Erase",
+	"overwrite_3_pass":      "Purge: 3-Pass Overwrite",
+	"overwrite_2_pass":      "Clear: 2-Pass Overwrite",
+	"android_factory_reset": "Clear: Factory Reset",
+}
+
+func getWipeMethodName(methodId string) string {
+	if name, ok := wipeMethodNames[methodId]; ok {
+		return name
+	}
+	return "Unknown"
 }
 
 // GetWipeMethodsForDrive returns NIST-compliant methods for standard storage.
@@ -126,6 +145,23 @@ func SanitizeDevice(config WipeConfig, progress chan<- string) error {
 }
 
 func sanitizeStorageDrive(config WipeConfig, progress chan<- string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	controls := &WipeControls{
+		cancel: cancel,
+		pause:  make(chan bool), // Assuming pause is handled elsewhere or not needed for all paths
+	}
+	wipeMutex.Lock()
+	activeWipes[config.DevicePath] = controls
+	wipeMutex.Unlock()
+
+	// Defer the cancellation and cleanup
+	defer func() {
+		cancel() // Ensure context is always cancelled
+		wipeMutex.Lock()
+		delete(activeWipes, config.DevicePath)
+		wipeMutex.Unlock()
+	}()
 	drives, err := detectStorageDrives()
 	if err != nil {
 		return fmt.Errorf("could not verify drive status: %w", err)
@@ -151,15 +187,15 @@ func sanitizeStorageDrive(config WipeConfig, progress chan<- string) error {
 
 	switch config.Method {
 	case "nvme_format":
-		return sanitizeNVMe(config.DevicePath, progress)
+		return sanitizeNVMe(ctx, config, progress)
 	case "sata_secure_erase":
-		return sanitizeSATA(config.DevicePath, progress)
+		return sanitizeSATA(ctx, config, progress)
 	case "overwrite_1_pass":
-		return sanitizeOverwrite(config, 1, progress)
+		return sanitizeOverwrite(ctx, controls, config, 1, progress)
 	case "overwrite_3_pass":
-		return sanitizeOverwrite(config, 3, progress)
+		return sanitizeOverwrite(ctx, controls, config, 3, progress)
 	case "overwrite_2_pass":
-		return sanitizeOverwriteTwoPass(config, progress)
+		return sanitizeOverwriteTwoPass(ctx, controls, config, progress)
 	default:
 		return fmt.Errorf("unknown sanitization method: %s", config.Method)
 	}
@@ -189,15 +225,44 @@ func runCommand(ctx context.Context, name string, args ...string) error {
 
 func sanitizeNVMe(path string, progress chan<- string) error {
 	progress <- "Executing NVMe Format..."
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	controls := &WipeControls{
+		cancel: cancel,
+		pause:  make(chan bool), // Not used for this method, but required by struct
+	}
+	wipeMutex.Lock()
+	activeWipes[path] = controls
+	wipeMutex.Unlock()
+
+	defer func() {
+		wipeMutex.Lock()
+		delete(activeWipes, path)
+		wipeMutex.Unlock()
+	}()
+
 	return runCommand(ctx, "nvme", "format", path, "-s", "1")
 }
 
 func sanitizeSATA(path string, progress chan<- string) error {
 	progress <- "Executing ATA Secure Erase..."
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	controls := &WipeControls{
+		cancel: cancel,
+		pause:  make(chan bool), // Not used, but required by struct
+	}
+	wipeMutex.Lock()
+	activeWipes[path] = controls
+	wipeMutex.Unlock()
+
+	defer func() {
+		wipeMutex.Lock()
+		delete(activeWipes, path)
+		wipeMutex.Unlock()
+	}()
 
 	err := runCommand(ctx, "hdparm", "--user-master", "user", "--security-set-pass", "dZap", path)
 	if err != nil {
@@ -224,7 +289,7 @@ func overwritePass(ctx context.Context, controls *WipeControls, config WipeConfi
 		return fmt.Errorf("could not seek to start: %w", err)
 	}
 
-	buffer := make([]byte, 1*1024*1024) // 1MB buffer
+	buffer := make([]byte, 128*1024) // 128KB buffer
 	for i := range buffer {
 		buffer[i] = pattern
 	}
@@ -235,7 +300,23 @@ func overwritePass(ctx context.Context, controls *WipeControls, config WipeConfi
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
+	writeDone := make(chan int, 1)
+	errChan := make(chan error, 1)
+	writing := false
+
 	for written < size {
+		if !writing {
+			go func() {
+				n, err := file.Write(buffer)
+				if err != nil {
+					errChan <- err
+					return
+				}
+				writeDone <- n
+			}()
+			writing = true
+		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -244,45 +325,41 @@ func overwritePass(ctx context.Context, controls *WipeControls, config WipeConfi
 				// Paused: wait for resume signal
 				<-controls.pause
 			}
-		default:
-		}
-
-		time.Sleep(10 * time.Millisecond) // Add a small delay to reduce I/O pressure
-		n, err := file.Write(buffer)
-		if err != nil {
+		case n := <-writeDone:
+			written += int64(n)
+			writing = false
+		case err := <-errChan:
 			log.Printf("overwritePass pass %d, write error: %v", passNum, err)
 			if err == io.EOF || (err != nil && strings.Contains(err.Error(), "no space left on device")) {
+				written = size // Mark as complete
 				break
 			}
 			return fmt.Errorf("write error on pass %d: %w", passNum, err)
-		}
-		written += int64(n)
-
-		select {
 		case <-ticker.C:
 			elapsed := time.Since(startTime).Seconds()
-			speed := float64(written) / elapsed / 1024 / 1024      // MB/s
-			eta := (float64(size-written) / (speed * 1024 * 1024)) // seconds
+			if elapsed > 0 {
+				speed := float64(written) / elapsed / 1024 / 1024      // MB/s
+				eta := (float64(size-written) / (speed * 1024 * 1024)) // seconds
 
-			// Correct progress calculation
-			passProgress := float64(written) * 100 / float64(size)
-			overallProgress := (float64(passNum-1) + passProgress/100) * 100 / float64(totalPasses)
+				passProgress := float64(written) * 100 / float64(size)
+				overallProgress := (float64(passNum-1) + passProgress/100) * 100 / float64(totalPasses)
 
-			progressMsg := WipeProgress{
-				DeviceID:     config.DevicePath,
-				Method:       config.Method,
-				Status:       fmt.Sprintf("Pass %d/%d", passNum, totalPasses),
-				Progress:     overallProgress,
-				CurrentPass:  passNum,
-				TotalPasses:  totalPasses,
-				Speed:        fmt.Sprintf("%.2f MB/s", speed),
-				ETA:          fmt.Sprintf("%.0fs", eta),
-				SectorNumber: written,
+				progressMsg := WipeProgress{
+					DeviceID:     config.DevicePath,
+					DeviceModel:  config.DeviceModel,
+					Method:       config.Method,
+					MethodName:   getWipeMethodName(config.Method),
+					Status:       fmt.Sprintf("Pass %d/%d", passNum, totalPasses),
+					Progress:     overallProgress,
+					CurrentPass:  passNum,
+					TotalPasses:  totalPasses,
+					Speed:        fmt.Sprintf("%.2f MB/s", speed),
+					ETA:          fmt.Sprintf("%.0fs", eta),
+					SectorNumber: written,
+				}
+				jsonMsg, _ := json.Marshal(progressMsg)
+				progress <- string(jsonMsg)
 			}
-			jsonMsg, _ := json.Marshal(progressMsg)
-			progress <- string(jsonMsg)
-
-		default:
 		}
 	}
 
