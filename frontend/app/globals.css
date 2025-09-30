@@ -175,3 +175,14 @@
     border-color: var(--component-border-hover);
   }
 }
+
+
+#Certificate{
+  width: 500px !important;
+  height: 80vh;
+}
+
+.Certificates {
+  width: 500px !important;
+  height: 80vh;
+}
