@@ -145,23 +145,7 @@ func SanitizeDevice(config WipeConfig, progress chan<- string) error {
 }
 
 func sanitizeStorageDrive(config WipeConfig, progress chan<- string) error {
-	ctx, cancel := context.WithCancel(context.Background())
 
-	controls := &WipeControls{
-		cancel: cancel,
-		pause:  make(chan bool), // Assuming pause is handled elsewhere or not needed for all paths
-	}
-	wipeMutex.Lock()
-	activeWipes[config.DevicePath] = controls
-	wipeMutex.Unlock()
-
-	// Defer the cancellation and cleanup
-	defer func() {
-		cancel() // Ensure context is always cancelled
-		wipeMutex.Lock()
-		delete(activeWipes, config.DevicePath)
-		wipeMutex.Unlock()
-	}()
 	drives, err := detectStorageDrives()
 	if err != nil {
 		return fmt.Errorf("could not verify drive status: %w", err)
@@ -187,15 +171,15 @@ func sanitizeStorageDrive(config WipeConfig, progress chan<- string) error {
 
 	switch config.Method {
 	case "nvme_format":
-		return sanitizeNVMe(ctx, config, progress)
+		return sanitizeNVMe(config.DevicePath, progress)
 	case "sata_secure_erase":
-		return sanitizeSATA(ctx, config, progress)
+		return sanitizeSATA(config.DevicePath, progress)
 	case "overwrite_1_pass":
-		return sanitizeOverwrite(ctx, controls, config, 1, progress)
+		return sanitizeOverwrite(config, 1, progress)
 	case "overwrite_3_pass":
-		return sanitizeOverwrite(ctx, controls, config, 3, progress)
+		return sanitizeOverwrite(config, 3, progress)
 	case "overwrite_2_pass":
-		return sanitizeOverwriteTwoPass(ctx, controls, config, progress)
+		return sanitizeOverwriteTwoPass(config, progress)
 	default:
 		return fmt.Errorf("unknown sanitization method: %s", config.Method)
 	}
