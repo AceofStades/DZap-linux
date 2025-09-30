@@ -42,7 +42,16 @@ export function Header({ activeTab, onTabChange, selectedDeviceName }: HeaderPro
                 )}
               >
                 {tab.label}
-                {tab.count && <span className="ml-2 px-2 py-0.5 text-xs bg-muted rounded-full">{tab.count}</span>}
+                {tab.count && (
+                  <span
+                    className="
+      ml-2 px-2 py-0.5 text-xs bg-muted rounded-full
+      text-black dark:text-white
+    "
+                  >
+                    {tab.count}
+                  </span>
+                )}
               </button>
             ))}
           </nav>
