@@ -453,7 +453,8 @@ Generated: ${new Date(certificate.createdAt).toLocaleString()}
 															<Eye className="h-4 w-4" />
 														</Button>
 													</DialogTrigger>
-													<DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto component-border">
+													
+													<DialogContent className="resize both overflow-auto border rounded-md p-4 w-80 h-40 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden  both max-w-4xl max-h-[80vh] overflow-y-auto component-border " id="Certificate" style={{ minWidth: "200px", minHeight: "100px" }}>
 														<DialogHeader>
 															<DialogTitle className="flex items-center space-x-2 text-foreground">
 																<Shield className="h-5 w-5" />
@@ -592,7 +593,7 @@ Generated: ${new Date(certificate.createdAt).toLocaleString()}
 	};
 
 	return (
-		<div className="space-y-6">
+		<div className="space-y-6 ">
 			<div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 				{/* Certificate Information */}
 				<Card className="component-border component-border-hover">
