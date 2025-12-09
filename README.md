@@ -4,15 +4,12 @@
 
 **DZap** is a cross-platform utility designed to securely sanitize storage media (HDDs, SSDs, NVMe, USBs) to NIST 800-88 standards.
 
-> ⚠️ **WARNING:** This software is designed to **permanently and irretrievably destroy data**. Use with extreme caution. The developers are not responsible for accidental data loss.
+> **WARNING:** This software is designed to **permanently and irretrievably destroy data**. Use with extreme caution. The developers are not responsible for accidental data loss.
 
 ---
 
 ## Screenshots
 
-| Drive Dashboard | Destruction Options |
-|:---:|:---:|
-| *[Place screenshot of dashboard here]* | *[Place screenshot of wipe options here]* |
 
 ---
 
@@ -27,22 +24,6 @@
 * **Hot-Plug Support:** Automatically detects drives connected via USB or SATA/NVMe interfaces.
 
 ---
-
-## Architecture
-
-DZap separates the User Interface from the Privileged Operations to ensure security and stability.
-
-```mermaid
-graph TD
-    User((User)) -->|Launches| AppImage(DZap AppImage<br>Electron + React)
-    AppImage -->|Requests Action| Polkit{System Policy<br>pkexec}
-    Polkit -->|Auth Success| Backend(Go Backend Helper<br>/usr/local/bin/dzap-backend)
-    Backend -->|Low Level Cmds| Hardware[(Storage Drives)]
-    Backend -->|WebSocket Updates| AppImage
-```
-
-
------
 
 ## Prerequisites
 
