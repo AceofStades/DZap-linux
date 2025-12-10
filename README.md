@@ -116,8 +116,7 @@ DZap/
 │   ├── core/          # Drive detection, Wiping logic, AI prediction
 │   └── realtime/      # WebSocket hub
 ├── model/             # ONNX AI models and feature maps
-├── com.dzap...policy  # Polkit security policy
-└── install.sh         # System installer script
+└── install.sh         # System installer script (In Development)
 ```
 
 -----
