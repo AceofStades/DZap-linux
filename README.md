@@ -31,7 +31,7 @@ Before installing, ensure your Linux system has the following dependencies:
 
   * **Runtime Tools:** `smartmontools`, `hdparm`, `nvme-cli`, `polkit`
   * **Build Tools:** `go` (v1.21+), `npm` / `node`, `gcc`
-  * **AI Runtime:** `libonnxruntime` (often available as `onnxruntime` or `libonnxruntime-dev`)
+  * **AI Runtime:** `libonnxruntime` (often available as `onnxruntime` or `libonnxruntime-dev`) (Disabled for now)
 
 **Arch Linux:**
 
@@ -56,11 +56,16 @@ Because DZap uses a system-level backend service, installation is a two-step pro
 Clone the repository and build the source code.
 
 ```bash
-# Install Node dependencies
 npm install
+npm install cross-env --save-dev
+npm run start:frontend
+```
 
-# Build Frontend & Backend, and package the AppImage
-npm run build
+In another terminal run:
+
+```bash
+cd server
+sudo go run .
 ```
 
 ### 2\. Install the Backend Helper
