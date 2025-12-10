@@ -10,6 +10,8 @@
 
 ## Screenshots
 
+![Dashboard](images/Dashboard.png)
+![Certificate Page](images/Certificate.png)
 
 ---
 
