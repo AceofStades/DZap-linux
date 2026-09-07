@@ -8,7 +8,8 @@ SIH PS: 25070
 To run backend:
 ```
 cd server
-sudo go run .
+cargo build --release
+sudo ./target/release/server
 ```
 
 To run frontend open a new terminal:
