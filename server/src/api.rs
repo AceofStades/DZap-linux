@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::core::{certificate, drives, predict, wiper};
+use crate::core::{certificate, drives, predict, preflight, wiper};
 use crate::realtime::Hub;
 
 /// Helper to ensure all error responses are in a consistent JSON format.
@@ -57,6 +57,30 @@ pub async fn wipe_drive_handler(
         }
     };
 
+    let preflight_config = config.clone();
+    let plan =
+        match tokio::task::spawn_blocking(move || preflight::authorize_wipe(&preflight_config))
+            .await
+        {
+            Ok(Ok(plan)) => plan,
+            Ok(Err(e)) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to run wipe preflight: {e}"),
+                );
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to run wipe preflight: {e}"),
+                );
+            }
+        };
+
+    if !plan.is_ready() {
+        return (StatusCode::PRECONDITION_FAILED, Json(plan)).into_response();
+    }
+
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // Forward progress messages to all websocket clients.
@@ -93,6 +117,32 @@ pub async fn wipe_drive_handler(
         Json(json!({ "status": "Wipe process started" })),
     )
         .into_response()
+}
+
+pub async fn preflight_wipe_handler(
+    body: Result<Json<wiper::WipeConfig>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(config) = match body {
+        Ok(c) => c,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid request body: {e}"),
+            );
+        }
+    };
+
+    match tokio::task::spawn_blocking(move || preflight::preflight_wipe(&config)).await {
+        Ok(Ok(plan)) => Json(plan).into_response(),
+        Ok(Err(e)) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to run wipe preflight: {e}"),
+        ),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to run wipe preflight: {e}"),
+        ),
+    }
 }
 
 pub async fn get_wipe_methods_handler(Path(identifier): Path<String>) -> Response {

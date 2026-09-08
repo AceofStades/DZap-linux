@@ -15,7 +15,11 @@ export interface Partition {
 // Specific type for standard storage drives
 export interface StorageDevice extends BaseDevice {
 	deviceCategory: "storage";
+	serial: string;
+	wwn: string;
 	size: string;
+	transport: string;
+	majorMinor: string;
 	isMounted: boolean;
 	isFrozen: boolean;
 	isOSDrive?: boolean;
@@ -58,4 +62,38 @@ export interface WipeMethod {
 	id: string;
 	name: string;
 	description: string;
+}
+
+export interface WipeRequest {
+	DevicePath: string;
+	Method: string;
+	DeviceSerial: string;
+	DeviceType: string;
+	DeviceModel: string;
+	ExpectedIdentity?: DeviceIdentity;
+}
+
+export interface DeviceIdentity {
+	model: string;
+	serial: string;
+	wwn: string;
+	sizeBytes: string;
+	transport: string;
+	majorMinor: string;
+}
+
+export interface PreflightCheck {
+	code: string;
+	status: "passed" | "blocked";
+	message: string;
+}
+
+export interface WipePlan {
+	decision: "ready" | "blocked";
+	devicePath: string;
+	deviceModel: string;
+	deviceType: string;
+	method: string;
+	identity: DeviceIdentity | null;
+	checks: PreflightCheck[];
 }

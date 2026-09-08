@@ -15,6 +15,7 @@ use tower_http::cors::CorsLayer;
 pub fn build_router(hub: realtime::Hub) -> Router {
     Router::new()
         .route("/api/drives", get(api::get_drives_handler))
+        .route("/api/wipe/preflight", post(api::preflight_wipe_handler))
         .route("/api/wipe", post(api::wipe_drive_handler))
         .route("/api/wipe/pause", post(api::pause_wipe_handler))
         .route("/api/wipe/abort", post(api::abort_wipe_handler))

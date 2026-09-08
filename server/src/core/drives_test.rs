@@ -32,7 +32,7 @@ fn lsblk_json_maps_devices_partitions_mounts_and_types() {
         "blockdevices": [
             {"name":"loop0","type":"loop","size":4096,"mountpoints":[null]},
             {"name":"nbd0","model":" Network disk ","size":100,"rota":false,"type":"disk","mountpoints":[null],"tran":"usb"},
-            {"name":"sda","model":" Spinning Disk  ","size":200,"rota":true,"type":"disk","mountpoints":[null],"children":[
+            {"name":"sda","model":" Spinning Disk  ","serial":" S123 ","wwn":" 0xabc ","size":200,"rota":true,"type":"disk","mountpoints":[null],"tran":"sata","maj:min":"8:0","children":[
                 {"name":"sda1","size":150,"type":"part","mountpoints":["/"],"fstype":"ext4"},
                 {"name":"sda2","size":50,"type":"part","mountpoints":[null]}
             ]},
@@ -55,6 +55,11 @@ fn lsblk_json_maps_devices_partitions_mounts_and_types() {
     assert_eq!(drives[0].drive_type, DriveType::Hdd, "nbd takes precedence");
 
     assert_eq!(drives[1].drive_type, DriveType::Hdd);
+    assert_eq!(drives[1].serial, "S123");
+    assert_eq!(drives[1].wwn, "0xabc");
+    assert_eq!(drives[1].transport, "sata");
+    assert_eq!(drives[1].major_minor, "8:0");
+    assert_eq!(drives[1].identity().size_bytes, "200");
     assert!(drives[1].is_mounted);
     assert!(drives[1].is_os_drive);
     assert_eq!(drives[1].partitions.len(), 2);

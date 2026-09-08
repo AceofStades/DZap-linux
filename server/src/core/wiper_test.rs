@@ -6,7 +6,11 @@ fn drive(drive_type: DriveType) -> Drive {
     Drive {
         name: "/dev/sda".to_string(),
         model: "Test".to_string(),
+        serial: "SERIAL".to_string(),
+        wwn: "WWN".to_string(),
         size: "1000".to_string(),
+        transport: "sata".to_string(),
+        major_minor: "8:0".to_string(),
         drive_type,
         is_mounted: false,
         is_frozen: false,
@@ -86,7 +90,7 @@ fn wipe_config_accepts_go_and_frontend_json_casing() {
     // The Go server used encoding/json (case-insensitive) and the frontend
     // sends PascalCase — both must keep working.
     let pascal: WipeConfig = serde_json::from_str(
-        r#"{"DevicePath":"/dev/sda","Method":"overwrite_1_pass","DeviceSerial":"S","DeviceType":"HDD","DeviceModel":"M"}"#,
+        r#"{"DevicePath":"/dev/sda","Method":"overwrite_1_pass","DeviceSerial":"S","DeviceType":"HDD","DeviceModel":"M","ExpectedIdentity":{"model":"M","serial":"S","wwn":"W","sizeBytes":"1000","transport":"sata","majorMinor":"8:0"}}"#,
     )
     .unwrap();
     assert_eq!(pascal.device_path, "/dev/sda");
@@ -94,12 +98,14 @@ fn wipe_config_accepts_go_and_frontend_json_casing() {
     assert_eq!(pascal.device_serial, "S");
     assert_eq!(pascal.device_type, "HDD");
     assert_eq!(pascal.device_model.as_deref(), Some("M"));
+    assert_eq!(pascal.expected_identity.as_ref().unwrap().wwn, "W");
 
     let camel: WipeConfig =
         serde_json::from_str(r#"{"devicePath":"/dev/sdb","method":"nvme_format"}"#).unwrap();
     assert_eq!(camel.device_path, "/dev/sdb");
     assert_eq!(camel.device_serial, "");
     assert_eq!(camel.device_model, None);
+    assert_eq!(camel.expected_identity, None);
 }
 
 #[test]
@@ -120,6 +126,7 @@ fn overwrite_pass_writes_pattern_to_full_extent() {
         device_serial: String::new(),
         device_type: String::new(),
         device_model: Some("Fake".to_string()),
+        expected_identity: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
@@ -169,6 +176,7 @@ fn overwrite_pass_does_not_extend_partial_final_block() {
         device_serial: String::new(),
         device_type: String::new(),
         device_model: None,
+        expected_identity: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
@@ -207,6 +215,7 @@ fn overwrite_pass_aborts_when_cancelled() {
         device_serial: String::new(),
         device_type: String::new(),
         device_model: None,
+        expected_identity: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
@@ -297,6 +306,7 @@ fn overwrite_pass_survives_dropped_progress_receiver() {
         device_serial: String::new(),
         device_type: String::new(),
         device_model: None,
+        expected_identity: None,
     };
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     drop(rx); // receiver gone
@@ -349,6 +359,7 @@ fn two_pass_overwrite_uses_complement_pattern_and_sends_completion() {
         device_serial: String::new(),
         device_type: "USB Drive".to_string(),
         device_model: Some("Test USB".to_string()),
+        expected_identity: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
@@ -398,6 +409,7 @@ fn three_pass_overwrite_cycles_patterns_and_cleans_up_registration() {
         device_serial: String::new(),
         device_type: "HDD".to_string(),
         device_model: None,
+        expected_identity: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 

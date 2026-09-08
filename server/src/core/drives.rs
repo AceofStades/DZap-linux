@@ -51,7 +51,12 @@ pub struct Partition {
 pub struct Drive {
     pub name: String,
     pub model: String,
+    pub serial: String,
+    pub wwn: String,
     pub size: String,
+    pub transport: String,
+    #[serde(rename = "majorMinor")]
+    pub major_minor: String,
     #[serde(rename = "type")]
     pub drive_type: DriveType,
     #[serde(rename = "isMounted")]
@@ -61,6 +66,41 @@ pub struct Drive {
     #[serde(rename = "isOSDrive")]
     pub is_os_drive: bool,
     pub partitions: Vec<Partition>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceIdentity {
+    pub model: String,
+    pub serial: String,
+    pub wwn: String,
+    pub size_bytes: String,
+    pub transport: String,
+    pub major_minor: String,
+}
+
+impl Drive {
+    pub fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity {
+            model: self.model.clone(),
+            serial: self.serial.clone(),
+            wwn: self.wwn.clone(),
+            size_bytes: self.size.clone(),
+            transport: self.transport.clone(),
+            major_minor: self.major_minor.clone(),
+        }
+    }
+}
+
+impl MobileDevice {
+    pub fn identity(&self) -> DeviceIdentity {
+        DeviceIdentity {
+            model: self.model.clone(),
+            serial: self.serial.clone(),
+            transport: "adb".to_string(),
+            ..DeviceIdentity::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +132,12 @@ pub struct LsblkDevice {
     pub fstype: Option<String>,
     #[serde(default)]
     pub tran: Option<String>,
+    #[serde(default)]
+    pub serial: Option<String>,
+    #[serde(default)]
+    pub wwn: Option<String>,
+    #[serde(rename = "maj:min", default)]
+    pub major_minor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,7 +175,7 @@ pub fn detect_storage_drives() -> Result<Vec<Drive>, String> {
             "-J",
             "-b",
             "-o",
-            "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINTS,FSTYPE,TRAN",
+            "NAME,MODEL,SERIAL,WWN,SIZE,ROTA,TYPE,MOUNTPOINTS,FSTYPE,TRAN,MAJ:MIN",
         ])
         .output()
         .map_err(|e| format!("lsblk command failed: {e}"))?;
@@ -187,7 +233,11 @@ where
         let mut drive = Drive {
             name: format!("/dev/{}", dev.name),
             model: dev.model.as_deref().unwrap_or("").trim().to_string(),
+            serial: dev.serial.as_deref().unwrap_or("").trim().to_string(),
+            wwn: dev.wwn.as_deref().unwrap_or("").trim().to_string(),
             size: dev.size.unwrap_or(0).to_string(),
+            transport: dev.tran.as_deref().unwrap_or("").trim().to_string(),
+            major_minor: dev.major_minor.as_deref().unwrap_or("").trim().to_string(),
             drive_type: determine_drive_type(dev),
             is_mounted,
             is_frozen: false,

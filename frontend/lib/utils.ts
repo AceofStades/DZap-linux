@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import type { WipePlan, WipeRequest } from "@/lib/types";
 
 export function cn(...inputs: ClassValue[]) {
 	return twMerge(clsx(inputs));
@@ -24,13 +25,33 @@ export async function getDriveHealth(deviceName: string) {
 	return response.json();
 }
 
-export async function startWipe(config: {
-	DevicePath: string;
-	Method: string;
-	DeviceSerial: string;
-	DeviceType: string;
-	DeviceModel: string;
-}) {
+async function wipeRequestError(response: Response): Promise<Error> {
+	const body = await response.json().catch(() => null);
+	if (body?.decision === "blocked" && Array.isArray(body.checks)) {
+		const reasons = body.checks
+			.filter((check: { status?: string }) => check.status === "blocked")
+			.map((check: { message?: string }) => check.message)
+			.filter(Boolean);
+		return new Error(reasons.join(" ") || "Wipe blocked by safety preflight.");
+	}
+	return new Error(body?.error || `Server error: ${response.status}`);
+}
+
+export async function preflightWipe(config: WipeRequest): Promise<WipePlan> {
+	const response = await fetch(`${API_BASE_URL}/wipe/preflight`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+		},
+		body: JSON.stringify(config),
+	});
+	if (!response.ok) {
+		throw await wipeRequestError(response);
+	}
+	return response.json();
+}
+
+export async function startWipe(config: WipeRequest) {
 	const response = await fetch(`${API_BASE_URL}/wipe`, {
 		method: "POST",
 		headers: {
@@ -39,7 +60,7 @@ export async function startWipe(config: {
 		body: JSON.stringify(config),
 	});
 	if (!response.ok) {
-		throw new Error("Failed to start wipe process");
+		throw await wipeRequestError(response);
 	}
 	return response.json();
 }

@@ -1,7 +1,9 @@
 // Port of server-go/core/wiper.go
 use super::drives::{
-    Drive, DriveType, MobileDevice, detect_android_devices, detect_storage_drives, log_line,
+    DeviceIdentity, Drive, DriveType, MobileDevice, detect_android_devices, detect_storage_drives,
+    log_line,
 };
+use super::preflight::authorize_wipe;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -75,6 +77,13 @@ pub struct WipeConfig {
         default
     )]
     pub device_model: Option<String>,
+    #[serde(
+        rename = "ExpectedIdentity",
+        alias = "expectedIdentity",
+        alias = "expected_identity",
+        default
+    )]
+    pub expected_identity: Option<DeviceIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,7 +204,15 @@ pub fn sanitize_device(
     config: WipeConfig,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(), String> {
-    if config.device_type == "Android" {
+    let plan = authorize_wipe(&config)?;
+    if !plan.is_ready() {
+        return Err(format!(
+            "wipe blocked by preflight: {}",
+            plan.blocking_message()
+        ));
+    }
+
+    if config.device_type.eq_ignore_ascii_case("android") {
         return sanitize_android(&config.device_serial, progress);
     }
     sanitize_storage_drive(config, progress)
@@ -205,21 +222,6 @@ fn sanitize_storage_drive(
     config: WipeConfig,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(), String> {
-    let drives =
-        detect_storage_drives().map_err(|e| format!("could not verify drive status: {e}"))?;
-
-    let target = drives
-        .iter()
-        .find(|d| d.name == config.device_path)
-        .ok_or_else(|| format!("drive {} not found", config.device_path))?;
-
-    if target.is_mounted {
-        return Err("cannot wipe a mounted drive".to_string());
-    }
-    if target.drive_type == DriveType::Ssd && target.is_frozen {
-        return Err("drive is in a frozen state".to_string());
-    }
-
     match config.method.as_str() {
         "nvme_format" => sanitize_nvme(&config.device_path, progress),
         "sata_secure_erase" => sanitize_sata(&config.device_path, progress),

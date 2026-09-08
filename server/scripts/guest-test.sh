@@ -65,7 +65,14 @@ log "PASS wipe-methods endpoint"
 # --- Test 3: actually wipe the virtual disk ----------------------------------
 dd if=/dev/urandom of=$SCRATCH bs=1M 2>/dev/null
 
-RESULT=$(http_post $BASE/api/wipe '{"DevicePath":"/dev/vda","Method":"overwrite_1_pass","DeviceSerial":"","DeviceType":"HDD","DeviceModel":"QEMU HARDDISK"}')
+PREFLIGHT_REQUEST='{"DevicePath":"/dev/vda","Method":"overwrite_1_pass","DeviceSerial":"","DeviceType":"HDD","DeviceModel":"QEMU HARDDISK"}'
+PLAN=$(http_post $BASE/api/wipe/preflight "$PREFLIGHT_REQUEST") || fail "POST /api/wipe/preflight failed"
+echo "$PLAN" | grep -q '"decision":"ready"' || fail "wipe preflight blocked: $PLAN"
+IDENTITY=$(echo "$PLAN" | sed -n 's/.*"identity":\({[^}]*}\),"checks".*/\1/p')
+[ -n "$IDENTITY" ] || fail "preflight response missing device identity: $PLAN"
+
+WIPE_REQUEST=$(printf '{"DevicePath":"/dev/vda","Method":"overwrite_1_pass","DeviceSerial":"","DeviceType":"HDD","DeviceModel":"QEMU HARDDISK","ExpectedIdentity":%s}' "$IDENTITY")
+RESULT=$(http_post $BASE/api/wipe "$WIPE_REQUEST")
 echo "$RESULT" | grep -q 'Wipe process started' || fail "POST /api/wipe rejected: $RESULT"
 
 # Poll until the whole disk reads back as zeros (pass-1 pattern is 0x00).
