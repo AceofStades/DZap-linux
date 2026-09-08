@@ -27,7 +27,7 @@ pub struct PredictionResult {
 
 // Wrapper to parse smartctl's ata_smart_attributes table with raw.value.
 #[derive(Debug, Deserialize)]
-struct AtaAttributeRaw {
+pub(crate) struct AtaAttributeRaw {
     #[serde(default)]
     id: i64,
     #[serde(default)]
@@ -64,7 +64,14 @@ pub fn predict_drive_health(device_path: &str) -> Result<PredictionResult, Strin
         }
     };
 
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+    prediction_from_smartctl_output(&out.stdout, true)
+}
+
+pub(crate) fn prediction_from_smartctl_output(
+    stdout: &[u8],
+    run_model: bool,
+) -> Result<PredictionResult, String> {
+    let json: serde_json::Value = serde_json::from_slice(stdout)
         .map_err(|e| format!("failed to parse S.M.A.R.T. data: {e}"))?;
 
     let mut result = PredictionResult {
@@ -128,7 +135,9 @@ pub fn predict_drive_health(device_path: &str) -> Result<PredictionResult, Strin
                     );
                 }
             }
-            run_sata_prediction(&mut result, &table);
+            if run_model {
+                run_sata_prediction(&mut result, &table);
+            }
         }
         _ => {
             result.smart_status = "Not supported".to_string();
@@ -156,35 +165,7 @@ fn try_run_sata_prediction(
     let feature_map: HashMap<String, String> = serde_json::from_str(&feature_map_file)
         .map_err(|e| format!("could not parse feature_map.json: {e}"))?;
 
-    let mut feature_names: Vec<String> = vec![String::new(); feature_map.len()];
-    for (key, value) in &feature_map {
-        let index: usize = match value
-            .trim_start_matches('f')
-            .parse()
-        {
-            Ok(i) => i,
-            Err(_) => {
-                log_line(&format!(
-                    "Warning: could not parse feature index from {value}"
-                ));
-                continue;
-            }
-        };
-        if index < feature_names.len() {
-            feature_names[index] = key.clone();
-        }
-    }
-
-    let mut smart_values: HashMap<String, i64> = HashMap::new();
-    for attr in table {
-        smart_values.insert(format!("smart_{}_raw", attr.id), attr.raw.value);
-        smart_values.insert(format!("smart_{}_normalized", attr.id), attr.value);
-    }
-
-    let input_tensor: Vec<f32> = feature_names
-        .iter()
-        .map(|feature| smart_values.get(feature).copied().unwrap_or(0) as f32)
-        .collect();
+    let input_tensor = build_sata_input(&feature_map, table);
 
     let n = input_tensor.len();
     let input = ort::value::Tensor::from_array(([1usize, n], input_tensor))
@@ -204,11 +185,47 @@ fn try_run_sata_prediction(
 
     let failure_probability = probabilities.get(1).copied().unwrap_or(0.0);
 
+    apply_failure_probability(result, failure_probability);
+    Ok(())
+}
+
+pub(crate) fn apply_failure_probability(result: &mut PredictionResult, failure_probability: f32) {
     result.failure_probability = failure_probability;
     if failure_probability > 0.5 {
         result.predicted_status = "At Risk".to_string();
     } else {
         result.predicted_status = "Healthy".to_string();
     }
-    Ok(())
+}
+
+pub(crate) fn build_sata_input(
+    feature_map: &HashMap<String, String>,
+    table: &[AtaAttributeRaw],
+) -> Vec<f32> {
+    let mut feature_names: Vec<String> = vec![String::new(); feature_map.len()];
+    for (key, value) in feature_map {
+        let index: usize = match value.trim_start_matches('f').parse() {
+            Ok(i) => i,
+            Err(_) => {
+                log_line(&format!(
+                    "Warning: could not parse feature index from {value}"
+                ));
+                continue;
+            }
+        };
+        if index < feature_names.len() {
+            feature_names[index] = key.clone();
+        }
+    }
+
+    let mut smart_values: HashMap<String, i64> = HashMap::new();
+    for attr in table {
+        smart_values.insert(format!("smart_{}_raw", attr.id), attr.raw.value);
+        smart_values.insert(format!("smart_{}_normalized", attr.id), attr.value);
+    }
+
+    feature_names
+        .iter()
+        .map(|feature| smart_values.get(feature).copied().unwrap_or(0) as f32)
+        .collect()
 }

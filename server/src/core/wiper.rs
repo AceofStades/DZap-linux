@@ -17,7 +17,7 @@ pub struct WipeControls {
     pub paused: Arc<AtomicBool>,
 }
 
-fn active_wipes() -> &'static Mutex<HashMap<String, Arc<WipeControls>>> {
+pub(crate) fn active_wipes() -> &'static Mutex<HashMap<String, Arc<WipeControls>>> {
     static ACTIVE_WIPES: OnceLock<Mutex<HashMap<String, Arc<WipeControls>>>> = OnceLock::new();
     ACTIVE_WIPES.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -54,11 +54,26 @@ pub struct WipeConfig {
     pub device_path: String,
     #[serde(rename = "Method", alias = "method")]
     pub method: String,
-    #[serde(rename = "DeviceSerial", alias = "deviceSerial", alias = "device_serial", default)]
+    #[serde(
+        rename = "DeviceSerial",
+        alias = "deviceSerial",
+        alias = "device_serial",
+        default
+    )]
     pub device_serial: String,
-    #[serde(rename = "DeviceType", alias = "deviceType", alias = "device_type", default)]
+    #[serde(
+        rename = "DeviceType",
+        alias = "deviceType",
+        alias = "device_type",
+        default
+    )]
     pub device_type: String,
-    #[serde(rename = "deviceModel", alias = "DeviceModel", alias = "device_model", default)]
+    #[serde(
+        rename = "deviceModel",
+        alias = "DeviceModel",
+        alias = "device_model",
+        default
+    )]
     pub device_model: Option<String>,
 }
 
@@ -69,7 +84,7 @@ pub struct WipeMethod {
     pub description: String,
 }
 
-fn wipe_method_name(method_id: &str) -> &'static str {
+pub(crate) fn wipe_method_name(method_id: &str) -> &'static str {
     match method_id {
         "nvme_format" => "Purge: NVMe Format",
         "overwrite_1_pass" => "Clear: 1-Pass Overwrite",
@@ -90,20 +105,46 @@ pub fn get_wipe_methods_for_drive(drive: &Drive) -> Vec<WipeMethod> {
     };
     match drive.drive_type {
         DriveType::Nvme => vec![
-            m("nvme_format", "Purge: NVMe Format", "Uses the drive's built-in, high-speed firmware command (NVM Express Format)."),
-            m("overwrite_1_pass", "Clear: Overwrite", "Not fully effective for flash media due to wear-leveling and over-provisioning."),
+            m(
+                "nvme_format",
+                "Purge: NVMe Format",
+                "Uses the drive's built-in, high-speed firmware command (NVM Express Format).",
+            ),
+            m(
+                "overwrite_1_pass",
+                "Clear: Overwrite",
+                "Not fully effective for flash media due to wear-leveling and over-provisioning.",
+            ),
         ],
         DriveType::Ssd => vec![
-            m("sata_secure_erase", "Purge: ATA Secure Erase", "Uses the drive's built-in firmware command to reset all memory cells."),
-            m("overwrite_1_pass", "Clear: Overwrite", "Not fully effective for flash media due to wear-leveling and over-provisioning."),
+            m(
+                "sata_secure_erase",
+                "Purge: ATA Secure Erase",
+                "Uses the drive's built-in firmware command to reset all memory cells.",
+            ),
+            m(
+                "overwrite_1_pass",
+                "Clear: Overwrite",
+                "Not fully effective for flash media due to wear-leveling and over-provisioning.",
+            ),
         ],
         DriveType::Hdd => vec![
-            m("overwrite_1_pass", "Clear: 1-Pass Overwrite", "A single pass of a fixed pattern, per NIST SP 800-88r1 guidelines."),
-            m("overwrite_3_pass", "Purge: 3-Pass Overwrite", "Three passes of a pseudorandom pattern, an optional NIST Purge method."),
+            m(
+                "overwrite_1_pass",
+                "Clear: 1-Pass Overwrite",
+                "A single pass of a fixed pattern, per NIST SP 800-88r1 guidelines.",
+            ),
+            m(
+                "overwrite_3_pass",
+                "Purge: 3-Pass Overwrite",
+                "Three passes of a pseudorandom pattern, an optional NIST Purge method.",
+            ),
         ],
-        DriveType::Usb | DriveType::Unknown => vec![
-            m("overwrite_2_pass", "Clear: 2-Pass Overwrite", "A pattern and its complement, per NIST guidelines for USB/removable media."),
-        ],
+        DriveType::Usb | DriveType::Unknown => vec![m(
+            "overwrite_2_pass",
+            "Clear: 2-Pass Overwrite",
+            "A pattern and its complement, per NIST guidelines for USB/removable media.",
+        )],
     }
 }
 
@@ -113,8 +154,9 @@ pub fn get_wipe_methods_for_mobile(device: &MobileDevice) -> Vec<WipeMethod> {
         "Android" => vec![WipeMethod {
             id: "android_factory_reset".to_string(),
             name: "Clear: Factory Reset".to_string(),
-            description: "Initiates the device's built-in factory data reset, as per NIST guidelines."
-                .to_string(),
+            description:
+                "Initiates the device's built-in factory data reset, as per NIST guidelines."
+                    .to_string(),
         }],
         _ => vec![],
     }
@@ -122,8 +164,7 @@ pub fn get_wipe_methods_for_mobile(device: &MobileDevice) -> Vec<WipeMethod> {
 
 /// Returns the available wipe methods for a specific device.
 pub fn get_wipe_methods(device_path: &str) -> Result<Vec<WipeMethod>, String> {
-    let drives =
-        detect_storage_drives().map_err(|e| format!("could not detect drives: {e}"))?;
+    let drives = detect_storage_drives().map_err(|e| format!("could not detect drives: {e}"))?;
 
     for drive in &drives {
         if drive.name == device_path {
@@ -189,25 +230,38 @@ fn sanitize_storage_drive(
     }
 }
 
-fn sanitize_android(
+pub(crate) fn sanitize_android(
     serial: &str,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(), String> {
+    sanitize_android_with(serial, progress, |serial| {
+        let status = Command::new("adb")
+            .args(["-s", serial, "reboot", "recovery"])
+            .status()
+            .map_err(|e| format!("failed to send reboot to recovery command: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "failed to send reboot to recovery command: {status}"
+            ));
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn sanitize_android_with<F>(
+    serial: &str,
+    progress: &tokio::sync::mpsc::UnboundedSender<String>,
+    reboot_to_recovery: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&str) -> Result<(), String>,
+{
     let _ = progress.send(format!(
         "Executing Android Factory Reset (NIST Clear) on device {serial}..."
     ));
-    let status = Command::new("adb")
-        .args(["-s", serial, "reboot", "recovery"])
-        .status()
-        .map_err(|e| format!("failed to send reboot to recovery command: {e}"))?;
-    if !status.success() {
-        return Err(format!(
-            "failed to send reboot to recovery command: {status}"
-        ));
-    }
+    reboot_to_recovery(serial)?;
     let _ = progress.send(
-        "Reboot to recovery command sent. The device will now perform a factory reset."
-            .to_string(),
+        "Reboot to recovery command sent. The device will now perform a factory reset.".to_string(),
     );
     Ok(())
 }
@@ -243,9 +297,7 @@ fn run_command(cancel: &Arc<AtomicBool>, name: &str, args: &[&str]) -> Result<()
                 if status.success() {
                     return Ok(());
                 }
-                return Err(format!(
-                    "command {name} failed: {status}. Output: {out}"
-                ));
+                return Err(format!("command {name} failed: {status}. Output: {out}"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(format!("command {name} failed: {e}")),
@@ -253,7 +305,7 @@ fn run_command(cancel: &Arc<AtomicBool>, name: &str, args: &[&str]) -> Result<()
     }
 }
 
-fn register_wipe(device_path: &str) -> Arc<WipeControls> {
+pub(crate) fn register_wipe(device_path: &str) -> Arc<WipeControls> {
     let controls = Arc::new(WipeControls {
         cancel: Arc::new(AtomicBool::new(false)),
         paused: Arc::new(AtomicBool::new(false)),
@@ -305,7 +357,7 @@ fn sanitize_sata(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn overwrite_pass(
+pub(crate) fn overwrite_pass(
     controls: &WipeControls,
     config: &WipeConfig,
     pattern: u8,
@@ -345,12 +397,13 @@ fn overwrite_pass(
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        match file.write(&buffer) {
+        let remaining = (size - written) as usize;
+        let chunk_len = remaining.min(buffer.len());
+        match file.write(&buffer[..chunk_len]) {
+            Ok(0) => return Err(format!("write error on pass {pass_num}: wrote zero bytes")),
             Ok(n) => written += n as i64,
             Err(e) => {
-                log_line(&format!(
-                    "overwrite_pass pass {pass_num}, write error: {e}"
-                ));
+                log_line(&format!("overwrite_pass pass {pass_num}, write error: {e}"));
                 if e.kind() == std::io::ErrorKind::UnexpectedEof
                     || e.to_string().contains("no space left on device")
                 {
@@ -463,7 +516,7 @@ fn send_completion(config: &WipeConfig, progress: &tokio::sync::mpsc::UnboundedS
     }
 }
 
-fn sanitize_overwrite_two_pass(
+pub(crate) fn sanitize_overwrite_two_pass(
     config: WipeConfig,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(), String> {
@@ -484,7 +537,7 @@ fn sanitize_overwrite_two_pass(
     Ok(())
 }
 
-fn sanitize_overwrite(
+pub(crate) fn sanitize_overwrite(
     config: WipeConfig,
     passes: i32,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,

@@ -125,7 +125,12 @@ pub fn detect_devices() -> serde_json::Value {
 
 pub fn detect_storage_drives() -> Result<Vec<Drive>, String> {
     let out = Command::new("lsblk")
-        .args(["-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINTS,FSTYPE,TRAN"])
+        .args([
+            "-J",
+            "-b",
+            "-o",
+            "NAME,MODEL,SIZE,ROTA,TYPE,MOUNTPOINTS,FSTYPE,TRAN",
+        ])
         .output()
         .map_err(|e| format!("lsblk command failed: {e}"))?;
     if !out.status.success() {
@@ -135,8 +140,18 @@ pub fn detect_storage_drives() -> Result<Vec<Drive>, String> {
         ));
     }
 
-    let lsblk_data: LsblkOutput = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("failed to parse lsblk JSON: {e}"))?;
+    storage_drives_from_lsblk(&out.stdout, is_drive_frozen)
+}
+
+pub(crate) fn storage_drives_from_lsblk<F>(
+    stdout: &[u8],
+    mut frozen_status: F,
+) -> Result<Vec<Drive>, String>
+where
+    F: FnMut(&str) -> Result<bool, String>,
+{
+    let lsblk_data: LsblkOutput =
+        serde_json::from_slice(stdout).map_err(|e| format!("failed to parse lsblk JSON: {e}"))?;
 
     let mut drives = Vec::new();
     for dev in &lsblk_data.blockdevices {
@@ -147,11 +162,7 @@ pub fn detect_storage_drives() -> Result<Vec<Drive>, String> {
 
         let first_mount = dev.mountpoints.first().and_then(|m| m.as_deref());
         let mut is_mounted = first_mount.is_some_and(|m| !m.is_empty());
-        let mut is_os_drive = dev
-            .mountpoints
-            .iter()
-            .flatten()
-            .any(|mp| mp == "/");
+        let mut is_os_drive = dev.mountpoints.iter().flatten().any(|mp| mp == "/");
 
         let mut partitions = Vec::new();
         for child in &dev.children {
@@ -175,12 +186,7 @@ pub fn detect_storage_drives() -> Result<Vec<Drive>, String> {
 
         let mut drive = Drive {
             name: format!("/dev/{}", dev.name),
-            model: dev
-                .model
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .to_string(),
+            model: dev.model.as_deref().unwrap_or("").trim().to_string(),
             size: dev.size.unwrap_or(0).to_string(),
             drive_type: determine_drive_type(dev),
             is_mounted,
@@ -190,7 +196,7 @@ pub fn detect_storage_drives() -> Result<Vec<Drive>, String> {
         };
 
         if drive.drive_type == DriveType::Ssd
-            && let Ok(frozen) = is_drive_frozen(&drive.name)
+            && let Ok(frozen) = frozen_status(&drive.name)
         {
             drive.is_frozen = frozen;
         }
@@ -283,21 +289,29 @@ pub fn detect_android_devices() -> Result<Vec<MobileDevice>, String> {
         .map_err(|e| format!("adb command not found or failed: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(android_devices_from_adb(&stdout, |serial| {
+        Command::new("adb")
+            .args(["-s", serial, "shell", "getprop", "ro.product.model"])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+    }))
+}
+
+pub(crate) fn android_devices_from_adb<F>(stdout: &str, mut model_for: F) -> Vec<MobileDevice>
+where
+    F: FnMut(&str) -> Option<String>,
+{
     let mut devices = Vec::new();
     // Skip the "List of devices attached" header
     for line in stdout.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() == 2 && fields[1] == "device" {
             let serial = fields[0];
-            let model_out = Command::new("adb")
-                .args(["-s", serial, "shell", "getprop", "ro.product.model"])
-                .output();
-            let Ok(model_out) = model_out else {
+            let Some(model) = model_for(serial) else {
                 continue; // Skip if we can't get the model
             };
-            let model = String::from_utf8_lossy(&model_out.stdout)
-                .trim()
-                .to_string();
+            let model = model.trim().to_string();
 
             devices.push(MobileDevice {
                 name: model.clone(),
@@ -308,7 +322,7 @@ pub fn detect_android_devices() -> Result<Vec<MobileDevice>, String> {
         }
     }
 
-    Ok(devices)
+    devices
 }
 
 fn determine_drive_type(dev: &LsblkDevice) -> DriveType {
@@ -337,14 +351,25 @@ fn is_drive_frozen(device_path: &str) -> Result<bool, String> {
         return Err(format!("hdparm failed: {}", out.status));
     }
 
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    Ok(hdparm_output_is_frozen(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
+}
+
+pub(crate) fn hdparm_output_is_frozen(stdout: &str) -> bool {
+    let mut in_security_section = false;
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("Security:") && trimmed.contains("frozen") {
-            return Ok(true);
+        if let Some(value) = trimmed.strip_prefix("Security:") {
+            in_security_section = true;
+            if value.trim() == "frozen" {
+                return true;
+            }
+        } else if in_security_section && trimmed == "frozen" {
+            return true;
         }
     }
-    Ok(false)
+    false
 }
 
 pub(crate) fn log_line(msg: &str) {

@@ -5,7 +5,7 @@ use rsa::pkcs8::{EncodePublicKey, LineEnding};
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use super::drives::log_line;
@@ -26,6 +26,16 @@ pub fn init() {
     }
 }
 
+/// Test-only init: use an ephemeral key so tests never touch the real
+/// key at ~/.config/DZap/private.pem.
+#[cfg(test)]
+pub fn init_for_tests() {
+    let _ = APP_PRIVATE_KEY.get_or_init(|| {
+        let mut rng = rand::thread_rng();
+        RsaPrivateKey::new(&mut rng, 2048).expect("failed to generate test key")
+    });
+}
+
 fn private_key() -> &'static RsaPrivateKey {
     APP_PRIVATE_KEY
         .get()
@@ -33,16 +43,18 @@ fn private_key() -> &'static RsaPrivateKey {
 }
 
 fn key_path() -> Result<PathBuf, String> {
-    let config_dir =
-        dirs::config_dir().ok_or("could not get user config directory".to_string())?;
+    let config_dir = dirs::config_dir().ok_or("could not get user config directory".to_string())?;
     Ok(config_dir.join("DZap").join("private.pem"))
 }
 
 fn load_or_generate_private_key() -> Result<RsaPrivateKey, String> {
     let key_path = key_path()?;
+    load_or_generate_private_key_at(&key_path)
+}
 
+pub(crate) fn load_or_generate_private_key_at(key_path: &Path) -> Result<RsaPrivateKey, String> {
     if key_path.exists() {
-        let key_data = std::fs::read_to_string(&key_path)
+        let key_data = std::fs::read_to_string(key_path)
             .map_err(|e| format!("could not read private key file: {e}"))?;
         return RsaPrivateKey::from_pkcs1_pem(&key_data)
             .map_err(|e| format!("failed to decode PEM block containing private key: {e}"));
@@ -64,9 +76,9 @@ fn load_or_generate_private_key() -> Result<RsaPrivateKey, String> {
             std::fs::Permissions::from_mode(0o700)
         });
     }
-    std::fs::write(&key_path, pem.as_bytes())
+    std::fs::write(key_path, pem.as_bytes())
         .map_err(|e| format!("failed to save new private key: {e}"))?;
-    let _ = std::fs::set_permissions(&key_path, {
+    let _ = std::fs::set_permissions(key_path, {
         use std::os::unix::fs::PermissionsExt;
         std::fs::Permissions::from_mode(0o600)
     });
@@ -145,7 +157,7 @@ pub fn generate_certificate(
     Ok(signed_cert)
 }
 
-fn hash_certificate_data(data: &CertificateData) -> Vec<u8> {
+pub(crate) fn hash_certificate_data(data: &CertificateData) -> Vec<u8> {
     // Matches Go's time.RFC3339 formatting for UTC timestamps.
     let ts = data.timestamp.format("%Y-%m-%dT%H:%M:%SZ");
     let payload = format!(
@@ -338,7 +350,11 @@ fn build_pdf(content: &str) -> Result<Vec<u8>, String> {
     obj(
         &mut buf,
         &mut offsets,
-        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()).as_bytes(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}endstream",
+            content.len()
+        )
+        .as_bytes(),
     );
 
     let xref_start = buf.len();
