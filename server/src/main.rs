@@ -1,11 +1,7 @@
 // Port of server-go/main.go
-mod api;
-mod core;
-mod realtime;
-
-use axum::Router;
-use axum::routing::{get, post};
-use tower_http::cors::CorsLayer;
+use server::build_router;
+use server::core::certificate;
+use server::realtime::Hub;
 
 #[tokio::main]
 async fn main() {
@@ -21,30 +17,10 @@ async fn main() {
     }
 
     // Load or generate the application private key (fatal on error).
-    core::certificate::init();
+    certificate::init();
 
-    let hub = realtime::Hub::new();
-
-    let app = Router::new()
-        .route("/api/drives", get(api::get_drives_handler))
-        .route("/api/wipe", post(api::wipe_drive_handler))
-        .route("/api/wipe/pause", post(api::pause_wipe_handler))
-        .route("/api/wipe/abort", post(api::abort_wipe_handler))
-        .route("/api/certificates", get(api::list_certificates_handler))
-        .route(
-            "/api/certificate/generate",
-            post(api::generate_certificate_handler),
-        )
-        .route("/api/unmount", post(api::unmount_drive_handler))
-        .route("/api/certificate", post(api::certificate_handler))
-        .route("/api/drive/{name}/health", get(api::get_drive_health_handler))
-        .route(
-            "/api/drive/{name}/wipe-methods",
-            get(api::get_wipe_methods_handler),
-        )
-        .route("/ws", get(api::ws_handler))
-        .layer(CorsLayer::permissive())
-        .with_state(hub);
+    let hub = Hub::new();
+    let app = build_router(hub);
 
     let listener = match tokio::net::TcpListener::bind("localhost:8080").await {
         Ok(l) => l,

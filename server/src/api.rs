@@ -1,8 +1,8 @@
 // Port of server-go/api/handlers.go
+use axum::Json;
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -11,11 +11,7 @@ use crate::realtime::Hub;
 
 /// Helper to ensure all error responses are in a consistent JSON format.
 fn error_response(code: StatusCode, message: &str) -> Response {
-    (
-        code,
-        Json(json!({ "error": message })),
-    )
-        .into_response()
+    (code, Json(json!({ "error": message }))).into_response()
 }
 
 pub async fn get_drives_handler() -> Response {
@@ -57,7 +53,7 @@ pub async fn wipe_drive_handler(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Invalid request body: {e}"),
-            )
+            );
         }
     };
 
@@ -135,7 +131,7 @@ pub async fn generate_certificate_handler(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Invalid request body: {e}"),
-            )
+            );
         }
     };
 
@@ -160,7 +156,7 @@ pub async fn pause_wipe_handler(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Invalid request body: {e}"),
-            )
+            );
         }
     };
 
@@ -182,7 +178,7 @@ pub async fn abort_wipe_handler(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Invalid request body: {e}"),
-            )
+            );
         }
     };
 
@@ -289,7 +285,7 @@ pub async fn certificate_handler(
             return error_response(
                 StatusCode::BAD_REQUEST,
                 &format!("Invalid request body: {e}"),
-            )
+            );
         }
     };
 
@@ -305,7 +301,7 @@ pub async fn certificate_handler(
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &format!("Failed to generate certificate: {e}"),
-            )
+            );
         }
     };
 
