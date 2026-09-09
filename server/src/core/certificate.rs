@@ -5,10 +5,13 @@ use rsa::pkcs8::{EncodePublicKey, LineEnding};
 use rsa::{Pkcs1v15Sign, RsaPrivateKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::drives::log_line;
+use super::jobs::{WipeJob, WipeJobStatus};
 
 static APP_PRIVATE_KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
 
@@ -88,19 +91,25 @@ pub(crate) fn load_or_generate_private_key_at(key_path: &Path) -> Result<RsaPriv
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CertificateData {
-    #[serde(rename = "deviceModel")]
+    pub job_id: String,
+    pub device_path: String,
     pub device_model: String,
-    #[serde(rename = "deviceSerial")]
     pub device_serial: String,
-    #[serde(rename = "wipeMethod")]
+    pub device_wwn: String,
+    pub device_size_bytes: String,
+    pub device_transport: String,
+    pub device_major_minor: String,
+    pub device_type: String,
     pub wipe_method: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
     pub timestamp: DateTime<Utc>,
-    #[serde(rename = "verificationHash")]
-    pub verification_hash: String,
+    pub evidence_hash: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SignedCertificate {
     pub data: CertificateData,
     pub signature: String,
@@ -112,18 +121,31 @@ pub struct SignedCertificate {
     pub qr_code: Option<qrcode::QrCode>,
 }
 
-pub fn generate_certificate(
-    model: &str,
-    serial: &str,
-    method: &str,
-    log_hash: &str,
-) -> Result<SignedCertificate, String> {
+pub fn generate_certificate_for_job(job: &WipeJob) -> Result<SignedCertificate, String> {
+    if job.status != WipeJobStatus::Completed {
+        return Err("certificate requires a completed wipe job".to_string());
+    }
+    if !job.verify_evidence() {
+        return Err("wipe job evidence verification failed".to_string());
+    }
+    let completed_at = job
+        .completed_at
+        .ok_or_else(|| "completed wipe job has no completion timestamp".to_string())?;
     let cert_data = CertificateData {
-        device_model: model.to_string(),
-        device_serial: serial.to_string(),
-        wipe_method: method.to_string(),
+        job_id: job.id.clone(),
+        device_path: job.device_path.clone(),
+        device_model: job.device_model.clone(),
+        device_serial: job.identity.serial.clone(),
+        device_wwn: job.identity.wwn.clone(),
+        device_size_bytes: job.identity.size_bytes.clone(),
+        device_transport: job.identity.transport.clone(),
+        device_major_minor: job.identity.major_minor.clone(),
+        device_type: job.device_type.clone(),
+        wipe_method: job.method.clone(),
+        started_at: job.started_at,
+        completed_at,
         timestamp: Utc::now(),
-        verification_hash: log_hash.to_string(),
+        evidence_hash: job.evidence_hash.clone(),
     };
 
     let hash = hash_certificate_data(&cert_data);
@@ -158,14 +180,207 @@ pub fn generate_certificate(
 }
 
 pub(crate) fn hash_certificate_data(data: &CertificateData) -> Vec<u8> {
-    // Matches Go's time.RFC3339 formatting for UTC timestamps.
-    let ts = data.timestamp.format("%Y-%m-%dT%H:%M:%SZ");
-    let payload = format!(
-        "{}|{}|{}|{}|{}",
-        data.device_model, data.device_serial, data.wipe_method, ts, data.verification_hash
-    );
-    Sha256::digest(payload.as_bytes()).to_vec()
+    let payload = serde_json::to_vec(data).expect("certificate data is serializable");
+    Sha256::digest(payload).to_vec()
 }
+
+impl SignedCertificate {
+    pub fn verify_signature(&self) -> bool {
+        use rsa::pkcs8::DecodePublicKey;
+
+        let Ok(public_key) = rsa::RsaPublicKey::from_public_key_pem(&self.public_key) else {
+            return false;
+        };
+        let Ok(signature) = hex::decode(&self.signature) else {
+            return false;
+        };
+        public_key
+            .verify(
+                Pkcs1v15Sign::new::<Sha256>(),
+                &hash_certificate_data(&self.data),
+                &signature,
+            )
+            .is_ok()
+    }
+
+    pub fn matches_job(&self, job: &WipeJob) -> bool {
+        job.status == WipeJobStatus::Completed
+            && job.completed_at == Some(self.data.completed_at)
+            && self.data.job_id == job.id
+            && self.data.device_path == job.device_path
+            && self.data.device_model == job.device_model
+            && self.data.device_serial == job.identity.serial
+            && self.data.device_wwn == job.identity.wwn
+            && self.data.device_size_bytes == job.identity.size_bytes
+            && self.data.device_transport == job.identity.transport
+            && self.data.device_major_minor == job.identity.major_minor
+            && self.data.device_type == job.device_type
+            && self.data.wipe_method == job.method
+            && self.data.started_at == job.started_at
+            && self.data.evidence_hash == job.evidence_hash
+    }
+}
+
+#[derive(Clone)]
+pub struct CertificateStore {
+    certificates: Arc<Mutex<HashMap<String, SignedCertificate>>>,
+    directory: Option<Arc<PathBuf>>,
+}
+
+impl CertificateStore {
+    pub fn in_memory() -> Self {
+        Self {
+            certificates: Arc::new(Mutex::new(HashMap::new())),
+            directory: None,
+        }
+    }
+
+    pub fn persistent(directory: PathBuf) -> Result<Self, String> {
+        std::fs::create_dir_all(&directory)
+            .map_err(|error| format!("failed to create certificate directory: {error}"))?;
+        set_directory_permissions(&directory);
+
+        let expected_public_key = private_key()
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .map_err(|error| format!("failed to encode application public key: {error}"))?;
+        let mut certificates = HashMap::new();
+        for entry in std::fs::read_dir(&directory)
+            .map_err(|error| format!("failed to read certificate directory: {error}"))?
+        {
+            let entry =
+                entry.map_err(|error| format!("failed to read certificate entry: {error}"))?;
+            let path = entry.path();
+            if path.is_dir() || path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let encoded = std::fs::read_to_string(&path)
+                .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+            let certificate: SignedCertificate = serde_json::from_str(&encoded)
+                .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+            if certificate.public_key != expected_public_key || !certificate.verify_signature() {
+                return Err(format!(
+                    "certificate verification failed for {}",
+                    path.display()
+                ));
+            }
+            let expected_file_name = format!("{}.json", certificate.data.job_id);
+            if path.file_name().and_then(|value| value.to_str()) != Some(&expected_file_name) {
+                return Err(format!(
+                    "certificate job identifier does not match {}",
+                    path.display()
+                ));
+            }
+            if certificates
+                .insert(certificate.data.job_id.clone(), certificate)
+                .is_some()
+            {
+                return Err("duplicate persisted certificate job identifier".to_string());
+            }
+        }
+
+        Ok(Self {
+            certificates: Arc::new(Mutex::new(certificates)),
+            directory: Some(Arc::new(directory)),
+        })
+    }
+
+    pub fn get(&self, job_id: &str) -> Result<Option<SignedCertificate>, String> {
+        Ok(self
+            .certificates
+            .lock()
+            .map_err(|_| "certificate store lock was poisoned".to_string())?
+            .get(job_id)
+            .cloned())
+    }
+
+    pub fn list(&self) -> Result<Vec<SignedCertificate>, String> {
+        let mut certificates: Vec<_> = self
+            .certificates
+            .lock()
+            .map_err(|_| "certificate store lock was poisoned".to_string())?
+            .values()
+            .cloned()
+            .collect();
+        certificates.sort_by_key(|certificate| std::cmp::Reverse(certificate.data.timestamp));
+        Ok(certificates)
+    }
+
+    pub fn save_if_absent(
+        &self,
+        certificate: SignedCertificate,
+    ) -> Result<SignedCertificate, String> {
+        let mut certificates = self
+            .certificates
+            .lock()
+            .map_err(|_| "certificate store lock was poisoned".to_string())?;
+        if let Some(existing) = certificates.get(&certificate.data.job_id) {
+            return Ok(existing.clone());
+        }
+
+        if let Some(directory) = &self.directory {
+            let encoded = serde_json::to_vec_pretty(&certificate)
+                .map_err(|error| format!("failed to encode certificate: {error}"))?;
+            atomic_write(
+                directory,
+                &format!("{}.json", certificate.data.job_id),
+                &encoded,
+            )?;
+        }
+        certificates.insert(certificate.data.job_id.clone(), certificate.clone());
+        Ok(certificate)
+    }
+}
+
+impl Default for CertificateStore {
+    fn default() -> Self {
+        Self::in_memory()
+    }
+}
+
+fn atomic_write(directory: &Path, file_name: &str, contents: &[u8]) -> Result<(), String> {
+    let destination = directory.join(file_name);
+    let temporary = directory.join(format!(".{file_name}.tmp"));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| format!("failed to open {}: {error}", temporary.display()))?;
+    file.write_all(contents)
+        .map_err(|error| format!("failed to write {}: {error}", temporary.display()))?;
+    set_file_permissions(&temporary);
+    file.sync_all()
+        .map_err(|error| format!("failed to sync {}: {error}", temporary.display()))?;
+    std::fs::rename(&temporary, &destination).map_err(|error| {
+        format!(
+            "failed to replace persisted certificate {}: {error}",
+            destination.display()
+        )
+    })?;
+    std::fs::File::open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("failed to sync {}: {error}", directory.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_directory_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn set_directory_permissions(_path: &Path) {}
+
+#[cfg(unix)]
+fn set_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn set_file_permissions(_path: &Path) {}
 
 // ---------------------------------------------------------------------------
 // Minimal PDF generation (replaces gofpdf).
@@ -258,9 +473,27 @@ impl SignedCertificate {
         // --- Certificate Details ---
         c.text("F1", 12.0, 10.0, 42.0, "Device Model:");
         c.text("F2", 12.0, 50.0, 42.0, &self.data.device_model);
+        c.text("F1", 10.0, 10.0, 50.0, "Device Serial:");
+        c.text("F2", 10.0, 50.0, 50.0, &self.data.device_serial);
+        c.text("F1", 10.0, 10.0, 58.0, "Wipe Method:");
+        c.text("F2", 10.0, 50.0, 58.0, &self.data.wipe_method);
+        c.text("F1", 10.0, 10.0, 66.0, "Job ID:");
+        c.text("F3", 8.0, 50.0, 66.0, &self.data.job_id);
+        c.text("F1", 10.0, 10.0, 74.0, "Evidence Hash:");
+        c.text("F3", 7.0, 50.0, 74.0, &self.data.evidence_hash);
 
         // --- QR Code for Verification ---
-        if let Some(qr) = &self.qr_code {
+        let generated_qr;
+        let qr = if let Some(qr) = &self.qr_code {
+            qr
+        } else {
+            let encoded = serde_json::to_vec(self)
+                .map_err(|error| format!("failed to encode certificate for QR code: {error}"))?;
+            generated_qr = qrcode::QrCode::new(encoded)
+                .map_err(|error| format!("failed to generate QR code: {error}"))?;
+            &generated_qr
+        };
+        {
             let quiet = 4isize;
             let width = qr.width() as isize;
             let total = (width + quiet * 2) as f64;

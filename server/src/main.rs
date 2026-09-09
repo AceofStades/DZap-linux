@@ -1,7 +1,7 @@
 // Port of server-go/main.go
-use server::build_router;
 use server::core::certificate;
 use server::realtime::Hub;
+use server::{AppState, build_router_with_state};
 
 #[tokio::main]
 async fn main() {
@@ -20,9 +20,16 @@ async fn main() {
     certificate::init();
 
     let hub = Hub::new();
-    let app = build_router(hub);
+    let state = match AppState::persistent(hub) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("FATAL: Could not load persistent evidence: {error}");
+            std::process::exit(1);
+        }
+    };
+    let app = build_router_with_state(state);
 
-    let listener = match tokio::net::TcpListener::bind("localhost:8080").await {
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:8080").await {
         Ok(l) => l,
         Err(e) => {
             eprintln!("Failed to start server: {e}");

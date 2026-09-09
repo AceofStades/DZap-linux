@@ -6,8 +6,8 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::core::{certificate, drives, predict, preflight, wiper};
-use crate::realtime::Hub;
+use crate::AppState;
+use crate::core::{certificate, drives, jobs::WipeJobStatus, predict, preflight, wiper};
 
 /// Helper to ensure all error responses are in a consistent JSON format.
 fn error_response(code: StatusCode, message: &str) -> Response {
@@ -44,7 +44,7 @@ pub async fn get_drive_health_handler(Path(drive_name): Path<String>) -> Respons
 }
 
 pub async fn wipe_drive_handler(
-    State(hub): State<Hub>,
+    State(state): State<AppState>,
     body: Result<Json<wiper::WipeConfig>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Json(config) = match body {
@@ -81,42 +81,98 @@ pub async fn wipe_drive_handler(
         return (StatusCode::PRECONDITION_FAILED, Json(plan)).into_response();
     }
 
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-    // Forward progress messages to all websocket clients.
-    let hub_fwd = hub.clone();
-    tokio::spawn(async move {
-        while let Some(msg) = progress_rx.recv().await {
-            hub_fwd.broadcast(msg);
+    let job = match state.jobs.create(&plan) {
+        Ok(job) => job,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to record wipe authorization: {error}"),
+            );
         }
-    });
-
+    };
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let device_path = config.device_path.clone();
-    tokio::task::spawn_blocking(move || {
-        let result = wiper::sanitize_device(config, &progress_tx);
+    let job_id = job.id.clone();
+    let task_job_id = job_id.clone();
+    tokio::spawn(async move {
+        let wipe_task = tokio::task::spawn_blocking(move || {
+            let result = wiper::sanitize_device(config, &progress_tx);
+            drop(progress_tx);
+            result
+        });
+
+        while let Some(message) = progress_rx.recv().await {
+            state
+                .hub
+                .broadcast(progress_message(&task_job_id, &message));
+        }
+
+        let result = match wipe_task.await {
+            Ok(result) => result,
+            Err(error) => Err(format!("wipe worker failed: {error}")),
+        };
         match result {
-            Err(e) => {
-                drives::log_line(&format!("ERROR in wipe_drive_handler (sanitization): {e}"));
-                hub.broadcast(format!("ERROR: {e}"));
-            }
-            Ok(()) => {
-                hub.broadcast(
+            Err(error) => {
+                drives::log_line(&format!(
+                    "ERROR in wipe_drive_handler (sanitization): {error}"
+                ));
+                let evidence_error = state.jobs.fail(&task_job_id, &error).err();
+                state.hub.broadcast(
                     json!({
-                        "status": "done",
+                        "status": "failed",
+                        "jobId": task_job_id,
                         "deviceId": device_path,
+                        "error": evidence_error
+                            .map(|record_error| format!("{error}; evidence error: {record_error}"))
+                            .unwrap_or(error),
                     })
                     .to_string(),
                 );
             }
+            Ok(()) => match state.jobs.complete(&task_job_id) {
+                Ok(completed) => state.hub.broadcast(
+                    json!({
+                        "status": "completed",
+                        "jobId": task_job_id,
+                        "deviceId": device_path,
+                        "evidenceHash": completed.evidence_hash,
+                    })
+                    .to_string(),
+                ),
+                Err(error) => state.hub.broadcast(
+                    json!({
+                        "status": "failed",
+                        "jobId": task_job_id,
+                        "deviceId": device_path,
+                        "error": format!(
+                            "Wipe completed, but completion evidence could not be recorded: {error}"
+                        ),
+                    })
+                    .to_string(),
+                ),
+            },
         }
-        drop(progress_tx);
     });
 
     (
         StatusCode::ACCEPTED,
-        Json(json!({ "status": "Wipe process started" })),
+        Json(json!({
+            "status": "Wipe process started",
+            "jobId": job_id,
+            "deviceId": job.device_path,
+        })),
     )
         .into_response()
+}
+
+fn progress_message(job_id: &str, message: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(message) {
+        Ok(serde_json::Value::Object(mut object)) => {
+            object.insert("jobId".to_string(), json!(job_id));
+            serde_json::Value::Object(object).to_string()
+        }
+        _ => json!({ "jobId": job_id, "message": message }).to_string(),
+    }
 }
 
 pub async fn preflight_wipe_handler(
@@ -141,6 +197,30 @@ pub async fn preflight_wipe_handler(
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to run wipe preflight: {e}"),
+        ),
+    }
+}
+
+pub async fn list_wipe_jobs_handler(State(state): State<AppState>) -> Response {
+    match state.jobs.list() {
+        Ok(jobs) => Json(jobs).into_response(),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to list wipe jobs: {error}"),
+        ),
+    }
+}
+
+pub async fn get_wipe_job_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match state.jobs.get(&id) {
+        Ok(Some(job)) => Json(job).into_response(),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "Wipe job not found"),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to load wipe job: {error}"),
         ),
     }
 }
@@ -171,26 +251,6 @@ pub async fn get_wipe_methods_handler(Path(identifier): Path<String>) -> Respons
     }
 }
 
-pub async fn generate_certificate_handler(
-    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
-) -> Response {
-    // This is a placeholder.
-    let Json(data) = match body {
-        Ok(d) => d,
-        Err(e) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Invalid request body: {e}"),
-            );
-        }
-    };
-
-    // For now, just log the data.
-    println!("Received data for certificate generation: {data:?}");
-
-    Json(json!({ "message": "Certificate generation request received" })).into_response()
-}
-
 #[derive(Debug, Deserialize)]
 pub struct DeviceIdRequest {
     #[serde(rename = "deviceId", alias = "DeviceId", alias = "deviceID")]
@@ -198,6 +258,7 @@ pub struct DeviceIdRequest {
 }
 
 pub async fn pause_wipe_handler(
+    State(state): State<AppState>,
     body: Result<Json<DeviceIdRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Json(req) = match body {
@@ -210,7 +271,8 @@ pub async fn pause_wipe_handler(
         }
     };
 
-    match wiper::pause_wipe(&req.device_id) {
+    let device_id = resolve_device_id(&state, &req.device_id);
+    match wiper::pause_wipe(&device_id) {
         Ok(()) => Json(json!({ "message": "Wipe pause request received" })).into_response(),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -220,6 +282,7 @@ pub async fn pause_wipe_handler(
 }
 
 pub async fn abort_wipe_handler(
+    State(state): State<AppState>,
     body: Result<Json<DeviceIdRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
     let Json(req) = match body {
@@ -232,7 +295,8 @@ pub async fn abort_wipe_handler(
         }
     };
 
-    match wiper::abort_wipe(&req.device_id) {
+    let device_id = resolve_device_id(&state, &req.device_id);
+    match wiper::abort_wipe(&device_id) {
         Ok(()) => Json(json!({ "message": "Wipe abort request received" })).into_response(),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -241,32 +305,21 @@ pub async fn abort_wipe_handler(
     }
 }
 
-pub async fn list_certificates_handler() -> Response {
-    let Some(config_dir) = dirs::config_dir() else {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Could not get user config directory",
-        );
-    };
-    let certs_dir = config_dir.join("DZap").join("certificates");
-
-    let mut certs: Vec<certificate::SignedCertificate> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&certs_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() || path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let Ok(data) = std::fs::read_to_string(&path) else {
-                continue; // Skip files that can't be read
-            };
-            if let Ok(cert) = serde_json::from_str::<certificate::SignedCertificate>(&data) {
-                certs.push(cert);
-            }
-        }
+fn resolve_device_id(state: &AppState, job_or_device_id: &str) -> String {
+    match state.jobs.get(job_or_device_id) {
+        Ok(Some(job)) => job.device_path,
+        _ => job_or_device_id.to_string(),
     }
+}
 
-    Json(certs).into_response()
+pub async fn list_certificates_handler(State(state): State<AppState>) -> Response {
+    match state.certificates.list() {
+        Ok(certificates) => Json(certificates).into_response(),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to list certificates: {error}"),
+        ),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,16 +369,13 @@ pub async fn unmount_drive_handler(
 
 #[derive(Debug, Deserialize)]
 pub struct CertRequest {
-    pub model: String,
-    pub serial: String,
-    pub method: String,
-    #[serde(rename = "logHash", alias = "LogHash", default)]
-    #[allow(dead_code)]
-    pub log_hash: String,
+    #[serde(rename = "jobId", alias = "job_id")]
+    pub job_id: String,
 }
 
-/// Port of the Go `CertificateHandler`. Supports `?format=pdf`.
+/// Issues a certificate from server-owned evidence. Supports `?format=pdf`.
 pub async fn certificate_handler(
+    State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     body: Result<Json<CertRequest>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
@@ -339,18 +389,63 @@ pub async fn certificate_handler(
         }
     };
 
-    // In a real app, the logHash would be more meaningful
-    let signed_cert = match certificate::generate_certificate(
-        &req.model,
-        &req.serial,
-        &req.method,
-        "placeholder_hash",
-    ) {
-        Ok(c) => c,
-        Err(e) => {
+    let job = match state.jobs.get(&req.job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "Wipe job not found"),
+        Err(error) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to generate certificate: {e}"),
+                &format!("Failed to load wipe job: {error}"),
+            );
+        }
+    };
+    if job.status != WipeJobStatus::Completed {
+        return error_response(
+            StatusCode::CONFLICT,
+            "Certificate requires a successfully completed wipe job",
+        );
+    }
+    if !job.verify_evidence() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "Wipe job evidence verification failed",
+        );
+    }
+
+    let signed_cert = match state.certificates.get(&req.job_id) {
+        Ok(Some(certificate)) => {
+            if !certificate.verify_signature() || !certificate.matches_job(&job) {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "Stored certificate does not match the wipe evidence",
+                );
+            }
+            certificate
+        }
+        Ok(None) => {
+            let generated = match certificate::generate_certificate_for_job(&job) {
+                Ok(certificate) => certificate,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to generate certificate: {error}"),
+                    );
+                }
+            };
+            match state.certificates.save_if_absent(generated) {
+                Ok(certificate) => certificate,
+                Err(error) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to persist certificate: {error}"),
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load certificate: {error}"),
             );
         }
     };
@@ -381,9 +476,9 @@ pub async fn certificate_handler(
     }
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(hub): State<Hub>) -> impl IntoResponse {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |mut socket| async move {
-        let mut rx = hub.sender.subscribe();
+        let mut rx = state.hub.sender.subscribe();
         loop {
             match rx.recv().await {
                 Ok(msg) => {

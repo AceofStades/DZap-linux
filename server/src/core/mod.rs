@@ -1,5 +1,6 @@
 pub mod certificate;
 pub mod drives;
+pub mod jobs;
 pub mod predict;
 pub mod preflight;
 pub mod wiper;

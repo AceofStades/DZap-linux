@@ -209,7 +209,7 @@ async fn certificates_list_is_json_array() {
 }
 
 #[tokio::test]
-async fn certificate_generate_placeholder_acknowledges() {
+async fn certificate_rejects_client_supplied_device_claims() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     let resp = client
@@ -218,11 +218,53 @@ async fn certificate_generate_placeholder_acknowledges() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing field `jobId`")
+    );
+}
+
+#[tokio::test]
+async fn certificate_requires_an_existing_server_job() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/api/certificate"))
+        .json(&json!({"jobId": "job-client-invented"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], json!("Wipe job not found"));
+}
+
+#[tokio::test]
+async fn wipe_jobs_start_empty_and_unknown_job_is_404() {
+    let base = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let list = client
+        .get(format!("{base}/api/wipe/jobs"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), 200);
+    assert_eq!(list.json::<Value>().await.unwrap(), json!([]));
+
+    let missing = client
+        .get(format!("{base}/api/wipe/jobs/job-missing"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
     assert_eq!(
-        body["message"],
-        json!("Certificate generation request received")
+        missing.json::<Value>().await.unwrap()["error"],
+        json!("Wipe job not found")
     );
 }
 

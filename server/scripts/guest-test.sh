@@ -74,12 +74,15 @@ IDENTITY=$(echo "$PLAN" | sed -n 's/.*"identity":\({[^}]*}\),"checks".*/\1/p')
 WIPE_REQUEST=$(printf '{"DevicePath":"/dev/vda","Method":"overwrite_1_pass","DeviceSerial":"","DeviceType":"HDD","DeviceModel":"QEMU HARDDISK","ExpectedIdentity":%s}' "$IDENTITY")
 RESULT=$(http_post $BASE/api/wipe "$WIPE_REQUEST")
 echo "$RESULT" | grep -q 'Wipe process started' || fail "POST /api/wipe rejected: $RESULT"
+JOB_ID=$(echo "$RESULT" | sed -n 's/.*"jobId":"\([^"]*\)".*/\1/p')
+[ -n "$JOB_ID" ] || fail "wipe response missing server job ID: $RESULT"
 
 # Poll until the whole disk reads back as zeros (pass-1 pattern is 0x00).
+dd if=/dev/zero of=/tmp/zero-probe bs=1M count=1 2>/dev/null
 WIPED=0
 for i in $(seq 1 120); do
     sleep 1
-    if dd if=$SCRATCH bs=1M count=1 2>/dev/null | cmp -s - /dev/zero; then
+    if dd if=$SCRATCH bs=1M count=1 2>/dev/null | cmp -s - /tmp/zero-probe; then
         WIPED=1
         break
     fi
@@ -91,14 +94,31 @@ dd if=/dev/zero of=/tmp/zeros bs=1M count=64 2>/dev/null
 cmp -s $SCRATCH /tmp/zeros || fail "scratch disk still has non-zero bytes after wipe"
 log "PASS overwrite_1_pass zeroed the entire virtual disk"
 
+# The device contents can become observable just before the worker records its
+# terminal evidence event. Wait for that server-owned completion record.
+JOB_COMPLETE=0
+for i in $(seq 1 15); do
+    JOB=$(http_get "$BASE/api/wipe/jobs/$JOB_ID") || fail "GET wipe job failed"
+    if echo "$JOB" | grep -q '"status":"completed"'; then
+        JOB_COMPLETE=1
+        break
+    fi
+    sleep 1
+done
+[ "$JOB_COMPLETE" = 1 ] || fail "wipe job did not record completion: $JOB"
+echo "$JOB" | grep -Eq '"evidenceHash":"[0-9a-f]{64}"' || fail "wipe job missing evidence hash: $JOB"
+log "PASS server recorded hash-chained wipe evidence"
+
 # --- Test 4: certificate endpoint --------------------------------------------
-CERT=$(http_post $BASE/api/certificate '{"model":"QEMU HARDDISK","serial":"QM00001","method":"overwrite_1_pass"}')
+CERT_REQUEST=$(printf '{"jobId":"%s"}' "$JOB_ID")
+CERT=$(http_post $BASE/api/certificate "$CERT_REQUEST")
 echo "$CERT" | grep -q '"signature":"' || fail "certificate missing signature: $CERT"
+echo "$CERT" | grep -q '"evidenceHash":"' || fail "certificate missing evidence hash: $CERT"
 log "PASS certificate generation"
 
 # --- Test 5: PDF format -------------------------------------------------------
 wget -q -O /tmp/cert.pdf --header='Content-Type: application/json' \
-    --post-data='{"model":"QEMU HARDDISK","serial":"QM00001","method":"overwrite_1_pass"}' \
+    --post-data="$CERT_REQUEST" \
     "$BASE/api/certificate?format=pdf" || fail "PDF endpoint failed"
 head -c 8 /tmp/cert.pdf | grep -q '%PDF-1.4' || fail "not a PDF"
 log "PASS PDF generation"
