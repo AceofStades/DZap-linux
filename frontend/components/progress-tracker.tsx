@@ -39,7 +39,7 @@ interface WipeJob {
 	deviceName: string;
 	deviceModel: string;
 	method: string;
-	status: "running" | "paused" | "completed" | "failed" | "queued";
+	status: "running" | "paused" | "verifying" | "verified" | "failed" | "queued";
 	progress: number;
 	currentPass: number;
 	totalPasses: number;
@@ -65,7 +65,8 @@ function jobView(record: WipeJobRecord): WipeJob {
 		deviceModel: record.deviceModel,
 		method: record.method,
 		status: record.status,
-		progress: record.status === "completed" ? 100 : 0,
+		progress:
+			record.status === "verifying" || record.status === "verified" ? 100 : 0,
 		currentPass: 0,
 		totalPasses: 0,
 		startTime: record.startedAt,
@@ -131,7 +132,8 @@ export function ProgressTracker() {
 						const job = newJobs.get(data.jobId);
 						if (job) {
 							const status =
-								data.status === "completed" ||
+								data.status === "verified" ||
+								data.status === "verifying" ||
 								data.status === "failed"
 									? data.status
 									: "running";
@@ -139,7 +141,7 @@ export function ProgressTracker() {
 								...job,
 								status,
 								progress:
-									status === "completed"
+									status === "verified" || status === "verifying"
 										? 100
 										: (data.progress ?? job.progress),
 								currentPass: data.currentPass ?? job.currentPass,
@@ -160,7 +162,7 @@ export function ProgressTracker() {
 						return newJobs;
 					});
 					if (
-						data.status === "completed" ||
+						data.status === "verified" ||
 						data.status === "failed"
 					) {
 						getWipeJob(data.jobId)
@@ -183,7 +185,7 @@ export function ProgressTracker() {
 					level:
 						data.status === "failed"
 							? "error"
-							: data.status === "completed"
+							: data.status === "verified"
 								? "success"
 								: "info",
 					message: data.message || data.error || event.data,
@@ -222,8 +224,10 @@ export function ProgressTracker() {
 				return <Play className="h-4 w-4 text-warning" />;
 			case "paused":
 				return <Pause className="h-4 w-4 text-muted-foreground" />;
-			case "completed":
+			case "verified":
 				return <CheckCircle className="h-4 w-4 text-success" />;
+			case "verifying":
+				return <Clock className="h-4 w-4 text-warning" />;
 			case "failed":
 				return <AlertCircle className="h-4 w-4 text-destructive" />;
 			default:
@@ -237,8 +241,10 @@ export function ProgressTracker() {
 				return "bg-warning/20 text-warning";
 			case "paused":
 				return "bg-muted text-muted-foreground";
-			case "completed":
+			case "verified":
 				return "bg-success/20 text-success";
+			case "verifying":
+				return "bg-warning/20 text-warning";
 			case "failed":
 				return "bg-destructive/20 text-destructive";
 			default:
@@ -546,7 +552,7 @@ export function ProgressTracker() {
 										)}
 									</div>
 
-									{selectedJobData.status === "completed" && (
+									{selectedJobData.status === "verified" && (
 										<>
 											<Separator />
 											<Button

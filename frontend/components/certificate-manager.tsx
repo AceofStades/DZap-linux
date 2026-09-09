@@ -135,7 +135,7 @@ export function CertificateManager() {
 					Certificate Management
 				</h1>
 				<p className="text-muted-foreground">
-					Signed certificates issued from completed server wipe jobs
+					Signed certificates issued from verified server wipe jobs
 				</p>
 			</div>
 
@@ -206,7 +206,7 @@ export function CertificateManager() {
 										<TableCell>{formatDate(certificate.data.completedAt)}</TableCell>
 										<TableCell>
 											<Badge className="bg-success/20 text-success">
-												<CheckCircle className="mr-1 h-3 w-3" /> Signed
+												<CheckCircle className="mr-1 h-3 w-3" /> Verified
 											</Badge>
 										</TableCell>
 										<TableCell>
@@ -262,8 +262,40 @@ export function CertificateManager() {
 								<Detail label="Started" value={formatDate(selected.data.startedAt)} />
 								<Detail label="Completed" value={formatDate(selected.data.completedAt)} />
 								<Detail label="Issued" value={formatDate(selected.data.timestamp)} />
+								<Detail
+									label="Verification strategy"
+									value={selected.data.verification.strategy}
+								/>
+								<Detail
+									label="Bytes checked"
+									value={selected.data.verification.bytesChecked.toLocaleString()}
+								/>
+								<Detail
+									label="Identity revalidated"
+									value={selected.data.verification.identityRevalidated ? "Yes" : "No"}
+								/>
+								{selected.data.verification.expectedPattern && (
+									<Detail
+										label="Expected pattern"
+										value={selected.data.verification.expectedPattern}
+									/>
+								)}
 							</div>
 
+							<Detail
+								label="Readback SHA-256"
+								value={selected.data.verification.readbackSha256}
+								mono
+								wrap
+							/>
+							{selected.data.verification.firmwareStatusSha256 && (
+								<Detail
+									label="Firmware status SHA-256"
+									value={selected.data.verification.firmwareStatusSha256}
+									mono
+									wrap
+								/>
+							)}
 							<Detail label="Evidence hash" value={selected.data.evidenceHash} mono wrap />
 							<Detail label="RSA signature" value={selected.signature} mono wrap />
 							<Detail label="Public key" value={selected.publicKey} mono wrap />

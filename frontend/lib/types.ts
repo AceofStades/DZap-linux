@@ -124,12 +124,26 @@ export interface WipeJobRecord {
 	deviceType: string;
 	identity: DeviceIdentity;
 	method: string;
-	status: "running" | "completed" | "failed";
+	status: "running" | "verifying" | "verified" | "failed";
 	startedAt: string;
+	sanitizationCompletedAt: string | null;
 	completedAt: string | null;
 	failure: string | null;
+	verification: VerificationResult | null;
 	evidenceHash: string;
 	events: EvidenceEvent[];
+}
+
+export interface VerificationResult {
+	strategy:
+		| "full_pattern_readback"
+		| "ata_security_status_and_samples"
+		| "nvme_format_status_and_samples";
+	bytesChecked: number;
+	readbackSha256: string;
+	expectedPattern: string | null;
+	firmwareStatusSha256: string | null;
+	identityRevalidated: boolean;
 }
 
 export interface CertificateData {
@@ -146,6 +160,7 @@ export interface CertificateData {
 	startedAt: string;
 	completedAt: string;
 	timestamp: string;
+	verification: VerificationResult;
 	evidenceHash: string;
 }
 
