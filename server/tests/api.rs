@@ -8,6 +8,7 @@
 
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::{Error as WebSocketError, client::IntoClientRequest};
 
 /// Spin up the real router on an ephemeral localhost port.
 async fn spawn_server() -> String {
@@ -269,7 +270,7 @@ async fn wipe_jobs_start_empty_and_unknown_job_is_404() {
 }
 
 #[tokio::test]
-async fn cors_allows_cross_origin_frontend() {
+async fn cors_allows_only_loopback_frontend() {
     let base = spawn_server().await;
     let client = reqwest::Client::new();
     // The frontend on :3000 preflights POST /api/wipe.
@@ -287,8 +288,38 @@ async fn cors_allows_cross_origin_frontend() {
         .get("access-control-allow-origin")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    assert_eq!(allow, "http://localhost:3000");
+
+    let rejected = client
+        .request(reqwest::Method::OPTIONS, format!("{base}/api/wipe"))
+        .header("Origin", "https://attacker.example")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .send()
+        .await
+        .unwrap();
     assert!(
-        allow == "*" || allow == "http://localhost:3000",
-        "unexpected ACAO: {allow:?}"
+        rejected
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none(),
+        "untrusted origin received CORS access: {:?}",
+        rejected.headers()
     );
+}
+
+#[tokio::test]
+async fn websocket_rejects_untrusted_browser_origin() {
+    let base = spawn_server().await;
+    let ws_url = format!("{}/ws", base.replacen("http://", "ws://", 1));
+    let mut request = ws_url.into_client_request().unwrap();
+    request
+        .headers_mut()
+        .insert("Origin", "https://attacker.example".parse().unwrap());
+
+    let error = tokio_tungstenite::connect_async(request).await.unwrap_err();
+    match error {
+        WebSocketError::Http(response) => assert_eq!(response.status(), 403),
+        other => panic!("unexpected WebSocket error: {other}"),
+    }
 }

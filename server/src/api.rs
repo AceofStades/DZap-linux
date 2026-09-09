@@ -1,7 +1,7 @@
 // Port of server-go/api/handlers.go
 use axum::Json;
 use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header::ORIGIN};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::json;
@@ -83,6 +83,10 @@ pub async fn wipe_drive_handler(
         return (StatusCode::PRECONDITION_FAILED, Json(plan)).into_response();
     }
 
+    let reservation = match wiper::reserve_device(&plan.device_path) {
+        Ok(reservation) => reservation,
+        Err(error) => return error_response(StatusCode::CONFLICT, &error),
+    };
     let job = match state.jobs.create(&plan) {
         Ok(job) => job,
         Err(error) => {
@@ -98,6 +102,7 @@ pub async fn wipe_drive_handler(
     let job_id = job.id.clone();
     let task_job_id = job_id.clone();
     tokio::spawn(async move {
+        let _reservation = reservation;
         let wipe_task = tokio::task::spawn_blocking(move || {
             let result = wiper::sanitize_device(config, &progress_tx);
             drop(progress_tx);
@@ -531,7 +536,19 @@ pub async fn certificate_handler(
     }
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn ws_handler(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> Response {
+    if headers.get(ORIGIN).is_some_and(|origin| {
+        origin
+            .to_str()
+            .map_or(true, |origin| !crate::is_allowed_ui_origin(origin))
+    }) {
+        return error_response(StatusCode::FORBIDDEN, "WebSocket origin is not allowed");
+    }
+
     ws.on_upgrade(move |mut socket| async move {
         let mut rx = state.hub.sender.subscribe();
         loop {
@@ -550,4 +567,5 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
             }
         }
     })
+    .into_response()
 }

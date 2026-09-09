@@ -340,6 +340,22 @@ fn register_unregister_cycle() {
 }
 
 #[test]
+fn device_reservation_blocks_overlapping_jobs_until_released() {
+    let device = format!("/dev/testdzap-reservation-{}", std::process::id());
+    let first = reserve_device(&device).unwrap();
+
+    let error = match reserve_device(&device) {
+        Ok(_) => panic!("overlapping reservation was accepted"),
+        Err(error) => error,
+    };
+    assert!(error.contains("already active"), "unexpected: {error}");
+
+    drop(first);
+    let replacement = reserve_device(&device).unwrap();
+    drop(replacement);
+}
+
+#[test]
 fn android_factory_reset_runs_for_serial_and_reports_progress() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let mut requested_serial = None;

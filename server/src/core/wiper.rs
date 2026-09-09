@@ -7,7 +7,7 @@ use super::drives::{
 use super::nvme::{self, NvmeSanitizeAction};
 use super::preflight::authorize_wipe;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::Command;
@@ -24,6 +24,40 @@ pub struct WipeControls {
 pub(crate) fn active_wipes() -> &'static Mutex<HashMap<String, Arc<WipeControls>>> {
     static ACTIVE_WIPES: OnceLock<Mutex<HashMap<String, Arc<WipeControls>>>> = OnceLock::new();
     ACTIVE_WIPES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn reserved_devices() -> &'static Mutex<HashSet<String>> {
+    static RESERVED_DEVICES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    RESERVED_DEVICES.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// An API-level reservation that prevents overlapping wipe jobs for one device.
+/// It is held until sanitization and verification have both finished.
+pub(crate) struct WipeReservation {
+    device_path: String,
+}
+
+impl Drop for WipeReservation {
+    fn drop(&mut self) {
+        reserved_devices()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.device_path);
+    }
+}
+
+pub(crate) fn reserve_device(device_path: &str) -> Result<WipeReservation, String> {
+    let mut devices = reserved_devices()
+        .lock()
+        .map_err(|_| "wipe reservation state is unavailable".to_string())?;
+    if !devices.insert(device_path.to_string()) {
+        return Err(format!(
+            "a wipe or verification is already active for device {device_path}"
+        ));
+    }
+    Ok(WipeReservation {
+        device_path: device_path.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]

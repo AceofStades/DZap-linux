@@ -9,10 +9,28 @@ mod api_test;
 mod realtime_test;
 
 use axum::Router;
+use axum::http::{HeaderValue, Method, header::CONTENT_TYPE};
 use axum::routing::{get, post};
 use core::certificate::CertificateStore;
 use core::jobs::JobStore;
 use tower_http::cors::CorsLayer;
+
+const UI_ORIGINS: [&str; 3] = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://[::1]:3000",
+];
+
+pub(crate) fn is_allowed_ui_origin(origin: &str) -> bool {
+    UI_ORIGINS.contains(&origin)
+}
+
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(UI_ORIGINS.map(HeaderValue::from_static))
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([CONTENT_TYPE])
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -83,6 +101,6 @@ pub fn build_router_with_state(state: AppState) -> Router {
             get(api::get_wipe_methods_handler),
         )
         .route("/ws", get(api::ws_handler))
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer())
         .with_state(state)
 }
