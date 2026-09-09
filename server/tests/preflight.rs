@@ -1,7 +1,7 @@
-use server::core::drives::{Drive, DriveType, MobileDevice};
+use server::core::drives::{BlockDependency, Drive, DriveType, MobileDevice};
 use server::core::preflight::{
     PreflightCheckStatus, PreflightDecision, authorize_mobile_wipe, authorize_storage_wipe,
-    evaluate_mobile_wipe, evaluate_storage_wipe,
+    evaluate_ata_hidden_areas, evaluate_mobile_wipe, evaluate_storage_wipe,
 };
 use server::core::wiper::WipeConfig;
 
@@ -29,6 +29,7 @@ fn drive(drive_type: DriveType) -> Drive {
         is_mounted: false,
         is_frozen: false,
         is_os_drive: false,
+        active_dependencies: vec![],
         partitions: vec![],
     }
 }
@@ -45,7 +46,7 @@ fn safe_storage_request_produces_ready_plan_from_detected_device() {
     assert_eq!(plan.method, "overwrite_1_pass");
     assert_eq!(plan.identity.as_ref().unwrap().serial, "SERIAL-1");
     assert_eq!(plan.identity.as_ref().unwrap().major_minor, "8:16");
-    assert_eq!(plan.checks.len(), 5);
+    assert_eq!(plan.checks.len(), 6);
     assert!(
         plan.checks
             .iter()
@@ -117,6 +118,84 @@ fn frozen_sata_ssd_is_blocked() {
             .status,
         PreflightCheckStatus::Blocked
     );
+}
+
+#[test]
+fn active_logical_storage_blocks_the_physical_drive() {
+    let mut target = drive(DriveType::Hdd);
+    target.active_dependencies = vec![
+        BlockDependency {
+            name: "/dev/md0".to_string(),
+            device_type: "raid1".to_string(),
+        },
+        BlockDependency {
+            name: "/dev/dm-0".to_string(),
+            device_type: "crypt".to_string(),
+        },
+    ];
+
+    let plan = evaluate_storage_wipe(&config("overwrite_1_pass"), &target);
+    let dependency_check = plan
+        .checks
+        .iter()
+        .find(|check| check.code == "active_block_dependencies")
+        .unwrap();
+
+    assert_eq!(plan.decision, PreflightDecision::Blocked);
+    assert_eq!(dependency_check.status, PreflightCheckStatus::Blocked);
+    assert!(dependency_check.message.contains("/dev/md0 (raid1)"));
+    assert!(dependency_check.message.contains("/dev/dm-0 (crypt)"));
+}
+
+#[test]
+fn ata_hidden_area_checks_pass_at_full_capacity() {
+    let checks = evaluate_ata_hidden_areas(
+        "max sectors = 1953529856/1953529856, HPA is disabled",
+        "DCO Checksum verified.\nReal max sectors: 1953529856",
+    );
+
+    assert_eq!(checks.len(), 2);
+    assert!(
+        checks
+            .iter()
+            .all(|check| check.status == PreflightCheckStatus::Passed)
+    );
+}
+
+#[test]
+fn ata_hidden_area_checks_report_hpa_and_dco_capacity() {
+    let checks = evaluate_ata_hidden_areas(
+        "max sectors = 1000/2000, HPA is enabled",
+        "DCO Checksum verified.\nReal max sectors: 3000",
+    );
+
+    let hpa = checks.iter().find(|check| check.code == "hpa").unwrap();
+    let dco = checks.iter().find(|check| check.code == "dco").unwrap();
+    assert_eq!(hpa.status, PreflightCheckStatus::Blocked);
+    assert!(hpa.message.contains("only 1000 of 2000 sectors"));
+    assert_eq!(dco.status, PreflightCheckStatus::Blocked);
+    assert!(dco.message.contains("3000 real sectors"));
+}
+
+#[test]
+fn malformed_or_untrustworthy_hdparm_output_fails_closed() {
+    for checks in [
+        evaluate_ata_hidden_areas("no sector data", "no sector data"),
+        evaluate_ata_hidden_areas(
+            "max sectors = 1000/1(2000?), HPA setting seems invalid (buggy kernel device driver?)",
+            "DCO Checksum FAILED!\nReal max sectors: 2000",
+        ),
+        evaluate_ata_hidden_areas(
+            "max sectors = 1000/1000, HPA is disabled",
+            "DCO Checksum verified.\nReal max sectors: 18446744073165333168",
+        ),
+    ] {
+        assert!(
+            checks
+                .iter()
+                .any(|check| check.status == PreflightCheckStatus::Blocked)
+        );
+    }
 }
 
 #[test]

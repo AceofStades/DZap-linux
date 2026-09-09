@@ -46,6 +46,7 @@ async fn drives_endpoint_returns_storage_and_mobile_keys() {
                 "isMounted",
                 "isFrozen",
                 "isOSDrive",
+                "activeDependencies",
                 "partitions",
             ] {
                 assert!(d.get(key).is_some(), "drive missing {key}: {d}");

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::process::Command;
 
 use super::drives::{
     DeviceIdentity, Drive, MobileDevice, detect_android_devices, detect_storage_drives,
@@ -51,6 +52,16 @@ impl WipePlan {
             .map(|check| check.message.as_str())
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    fn add_checks(&mut self, checks: Vec<PreflightCheck>) {
+        if checks
+            .iter()
+            .any(|check| check.status == PreflightCheckStatus::Blocked)
+        {
+            self.decision = PreflightDecision::Blocked;
+        }
+        self.checks.extend(checks);
     }
 }
 
@@ -176,6 +187,20 @@ fn evaluate_storage_wipe_with_identity(
             "The device or one of its partitions is mounted.".to_string(),
         ),
         check(
+            "active_block_dependencies",
+            drive.active_dependencies.is_empty(),
+            "Device does not back an active RAID, LVM, encrypted, or device-mapper volume.",
+            format!(
+                "The device backs active logical storage: {}. Deactivate it before wiping the physical drive.",
+                drive
+                    .active_dependencies
+                    .iter()
+                    .map(|dependency| format!("{} ({})", dependency.name, dependency.device_type))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ),
+        check(
             "frozen",
             !(drive.drive_type == super::drives::DriveType::Ssd && drive.is_frozen),
             "Device is not in an ATA security-frozen state.",
@@ -250,6 +275,179 @@ pub fn authorize_mobile_wipe(config: &WipeConfig, device: &MobileDevice) -> Wipe
     evaluate_mobile_wipe_with_identity(config, device, true)
 }
 
+fn decimal_prefix(value: &str) -> Result<u64, String> {
+    let digits: String = value
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        return Err(format!("missing sector count in {value:?}"));
+    }
+    digits
+        .parse::<u64>()
+        .map_err(|error| format!("invalid sector count {digits:?}: {error}"))
+}
+
+pub fn parse_hpa_sector_counts(output: &str) -> Result<(u64, u64), String> {
+    let lower = output.to_ascii_lowercase();
+    if lower.contains("setting seems invalid") || lower.contains("buggy kernel") {
+        return Err("hdparm reported an invalid HPA sector count".to_string());
+    }
+
+    let line = output
+        .lines()
+        .find(|line| line.to_ascii_lowercase().contains("max sectors"))
+        .ok_or_else(|| "hdparm output did not contain max sectors".to_string())?;
+    let (_, counts) = line
+        .split_once('=')
+        .ok_or_else(|| "hdparm max sectors line did not contain '='".to_string())?;
+    let (visible, native) = counts.split_once('/').ok_or_else(|| {
+        "hdparm max sectors line did not contain visible/native values".to_string()
+    })?;
+
+    Ok((decimal_prefix(visible)?, decimal_prefix(native)?))
+}
+
+pub fn parse_dco_real_max_sectors(output: &str) -> Result<u64, String> {
+    if output.to_ascii_lowercase().contains("checksum failed") {
+        return Err("hdparm reported a failed DCO checksum".to_string());
+    }
+
+    let line = output
+        .lines()
+        .find(|line| line.to_ascii_lowercase().contains("real max sectors"))
+        .ok_or_else(|| "hdparm output did not contain DCO real max sectors".to_string())?;
+    let (_, value) = line
+        .split_once(':')
+        .ok_or_else(|| "hdparm DCO sector line did not contain ':'".to_string())?;
+    let sectors = decimal_prefix(value)?;
+    if sectors > (1_u64 << 48) {
+        return Err("hdparm reported an impossible DCO sector count".to_string());
+    }
+    Ok(sectors)
+}
+
+fn evaluate_ata_hidden_area_results(
+    hpa_output: Result<String, String>,
+    dco_output: Result<String, String>,
+) -> Vec<PreflightCheck> {
+    let hpa_counts = hpa_output.and_then(|output| parse_hpa_sector_counts(&output));
+    let (hpa_check, native_sectors) = match hpa_counts {
+        Ok((visible, native)) if visible == native => (
+            check(
+                "hpa",
+                true,
+                "No Host Protected Area is active.",
+                String::new(),
+            ),
+            Some(native),
+        ),
+        Ok((visible, native)) if visible < native => (
+            check(
+                "hpa",
+                false,
+                "No Host Protected Area is active.",
+                format!(
+                    "Host Protected Area detected: only {visible} of {native} sectors are visible. Restore full capacity through a separate recovery workflow before wiping."
+                ),
+            ),
+            Some(native),
+        ),
+        Ok((visible, native)) => (
+            check(
+                "hpa",
+                false,
+                "No Host Protected Area is active.",
+                format!("HPA sector counts are inconsistent: visible {visible}, native {native}."),
+            ),
+            None,
+        ),
+        Err(error) => (
+            check(
+                "hpa",
+                false,
+                "No Host Protected Area is active.",
+                format!("Could not verify HPA state: {error}."),
+            ),
+            None,
+        ),
+    };
+
+    let dco_check = match (
+        dco_output.and_then(|output| parse_dco_real_max_sectors(&output)),
+        native_sectors,
+    ) {
+        (Ok(real), Some(native)) if real == native => check(
+            "dco",
+            true,
+            "No Device Configuration Overlay hides drive capacity.",
+            String::new(),
+        ),
+        (Ok(real), Some(native)) if real > native => check(
+            "dco",
+            false,
+            "No Device Configuration Overlay hides drive capacity.",
+            format!(
+                "Device Configuration Overlay detected: the drive reports {real} real sectors but only {native} native sectors are exposed. Restore full capacity through a separate recovery workflow before wiping."
+            ),
+        ),
+        (Ok(real), Some(native)) => check(
+            "dco",
+            false,
+            "No Device Configuration Overlay hides drive capacity.",
+            format!("DCO sector counts are inconsistent: real {real}, native {native}."),
+        ),
+        (Ok(_), None) => check(
+            "dco",
+            false,
+            "No Device Configuration Overlay hides drive capacity.",
+            "Could not compare DCO capacity because the HPA/native capacity check failed."
+                .to_string(),
+        ),
+        (Err(error), _) => check(
+            "dco",
+            false,
+            "No Device Configuration Overlay hides drive capacity.",
+            format!("Could not verify DCO state: {error}."),
+        ),
+    };
+
+    vec![hpa_check, dco_check]
+}
+
+pub fn evaluate_ata_hidden_areas(hpa_output: &str, dco_output: &str) -> Vec<PreflightCheck> {
+    evaluate_ata_hidden_area_results(Ok(hpa_output.to_string()), Ok(dco_output.to_string()))
+}
+
+fn run_hdparm(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("hdparm")
+        .args(args)
+        .output()
+        .map_err(|error| format!("hdparm could not start: {error}"))?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(format!(
+            "hdparm exited with {}: {}",
+            output.status,
+            text.trim()
+        ));
+    }
+    Ok(text)
+}
+
+fn is_ata_drive(drive: &Drive) -> bool {
+    matches!(drive.transport.as_str(), "ata" | "ide" | "sata")
+}
+
+fn probe_ata_hidden_areas(drive: &Drive) -> Vec<PreflightCheck> {
+    evaluate_ata_hidden_area_results(
+        run_hdparm(&["-N", &drive.name]),
+        run_hdparm(&["--dco-identify", &drive.name]),
+    )
+}
+
 fn build_wipe_plan(config: &WipeConfig, require_identity: bool) -> Result<WipePlan, String> {
     if config.device_type.eq_ignore_ascii_case("android") {
         let identifier = if config.device_serial.is_empty() {
@@ -273,7 +471,13 @@ fn build_wipe_plan(config: &WipeConfig, require_identity: bool) -> Result<WipePl
         detect_storage_drives().map_err(|e| format!("could not verify drive status: {e}"))?;
     Ok(
         match drives.iter().find(|drive| drive.name == config.device_path) {
-            Some(drive) => evaluate_storage_wipe_with_identity(config, drive, require_identity),
+            Some(drive) => {
+                let mut plan = evaluate_storage_wipe_with_identity(config, drive, require_identity);
+                if is_ata_drive(drive) {
+                    plan.add_checks(probe_ata_hidden_areas(drive));
+                }
+                plan
+            }
             None => missing_device_plan(config, &config.device_path),
         },
     )

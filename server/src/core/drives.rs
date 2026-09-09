@@ -47,6 +47,13 @@ pub struct Partition {
     pub fs_type: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlockDependency {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub device_type: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Drive {
     pub name: String,
@@ -65,6 +72,8 @@ pub struct Drive {
     pub is_frozen: bool,
     #[serde(rename = "isOSDrive")]
     pub is_os_drive: bool,
+    #[serde(rename = "activeDependencies")]
+    pub active_dependencies: Vec<BlockDependency>,
     pub partitions: Vec<Partition>,
 }
 
@@ -189,7 +198,7 @@ pub fn detect_storage_drives() -> Result<Vec<Drive>, String> {
     storage_drives_from_lsblk(&out.stdout, is_drive_frozen)
 }
 
-pub(crate) fn storage_drives_from_lsblk<F>(
+pub fn storage_drives_from_lsblk<F>(
     stdout: &[u8],
     mut frozen_status: F,
 ) -> Result<Vec<Drive>, String>
@@ -206,23 +215,11 @@ where
             continue;
         }
 
-        let first_mount = dev.mountpoints.first().and_then(|m| m.as_deref());
-        let mut is_mounted = first_mount.is_some_and(|m| !m.is_empty());
-        let mut is_os_drive = dev.mountpoints.iter().flatten().any(|mp| mp == "/");
+        let mut usage = BlockUsage::default();
+        inspect_block_usage(dev, false, &mut usage);
 
         let mut partitions = Vec::new();
         for child in &dev.children {
-            if child
-                .mountpoints
-                .first()
-                .and_then(|m| m.as_deref())
-                .is_some_and(|m| !m.is_empty())
-            {
-                is_mounted = true;
-            }
-            if child.mountpoints.iter().flatten().any(|mp| mp == "/") {
-                is_os_drive = true;
-            }
             partitions.push(Partition {
                 name: format!("/dev/{}", child.name),
                 size: child.size.unwrap_or(0).to_string(),
@@ -239,9 +236,10 @@ where
             transport: dev.tran.as_deref().unwrap_or("").trim().to_string(),
             major_minor: dev.major_minor.as_deref().unwrap_or("").trim().to_string(),
             drive_type: determine_drive_type(dev),
-            is_mounted,
+            is_mounted: usage.is_mounted,
             is_frozen: false,
-            is_os_drive,
+            is_os_drive: usage.is_os_drive,
+            active_dependencies: usage.active_dependencies,
             partitions,
         };
 
@@ -253,6 +251,47 @@ where
         drives.push(drive);
     }
     Ok(drives)
+}
+
+#[derive(Default)]
+struct BlockUsage {
+    is_mounted: bool,
+    is_os_drive: bool,
+    active_dependencies: Vec<BlockDependency>,
+}
+
+fn inspect_block_usage(device: &LsblkDevice, is_descendant: bool, usage: &mut BlockUsage) {
+    if device
+        .mountpoints
+        .iter()
+        .flatten()
+        .any(|mountpoint| !mountpoint.is_empty())
+    {
+        usage.is_mounted = true;
+    }
+    if device
+        .mountpoints
+        .iter()
+        .flatten()
+        .any(|mountpoint| mountpoint == "/")
+    {
+        usage.is_os_drive = true;
+    }
+
+    let device_type = device.dev_type.as_deref().unwrap_or("");
+    if is_descendant && !device_type.is_empty() && device_type != "part" {
+        let dependency = BlockDependency {
+            name: format!("/dev/{}", device.name),
+            device_type: device_type.to_string(),
+        };
+        if !usage.active_dependencies.contains(&dependency) {
+            usage.active_dependencies.push(dependency);
+        }
+    }
+
+    for child in &device.children {
+        inspect_block_usage(child, true, usage);
+    }
 }
 
 pub fn unmount_device(device_path: &str) -> Result<(), String> {

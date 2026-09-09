@@ -15,6 +15,7 @@ fn drive(drive_type: DriveType) -> Drive {
         is_mounted: false,
         is_frozen: false,
         is_os_drive: false,
+        active_dependencies: vec![],
         partitions: vec![],
     }
 }

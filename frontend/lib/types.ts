@@ -12,6 +12,11 @@ export interface Partition {
 	type: string;
 }
 
+export interface BlockDependency {
+	name: string;
+	type: string;
+}
+
 // Specific type for standard storage drives
 export interface StorageDevice extends BaseDevice {
 	deviceCategory: "storage";
@@ -23,6 +28,7 @@ export interface StorageDevice extends BaseDevice {
 	isMounted: boolean;
 	isFrozen: boolean;
 	isOSDrive?: boolean;
+	activeDependencies: BlockDependency[];
 	partitions: Partition[];
 	status?: "ready" | "wiping" | "completed" | "error" | "not-ready";
 	health?: DriveHealth;
