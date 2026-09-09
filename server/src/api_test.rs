@@ -2,6 +2,7 @@ use crate::api::{CertRequest, certificate_handler};
 use crate::core::certificate;
 use crate::core::drives::DeviceIdentity;
 use crate::core::preflight::{PreflightDecision, WipePlan};
+use crate::core::verification::{VerificationResult, VerificationStrategy};
 use crate::{AppState, realtime::Hub};
 use axum::Json;
 use axum::body::to_bytes;
@@ -9,7 +10,7 @@ use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
 use std::collections::HashMap;
 
-fn state_with_job(completed: bool) -> (AppState, String) {
+fn state_with_job(verified: bool) -> (AppState, String) {
     let state = AppState::in_memory(Hub::new());
     let job = state
         .jobs
@@ -30,14 +31,28 @@ fn state_with_job(completed: bool) -> (AppState, String) {
             checks: Vec::new(),
         })
         .unwrap();
-    if completed {
-        state.jobs.complete(&job.id).unwrap();
+    if verified {
+        state.jobs.begin_verification(&job.id).unwrap();
+        state
+            .jobs
+            .complete_verification(
+                &job.id,
+                VerificationResult {
+                    strategy: VerificationStrategy::FullPatternReadback,
+                    bytes_checked: 8192,
+                    readback_sha256: "b".repeat(64),
+                    expected_pattern: Some("0x00".to_string()),
+                    firmware_status_sha256: None,
+                    identity_revalidated: true,
+                },
+            )
+            .unwrap();
     }
     (state, job.id)
 }
 
 #[tokio::test]
-async fn certificate_handler_returns_completed_job_evidence() {
+async fn certificate_handler_returns_verified_job_evidence() {
     certificate::init_for_tests();
     let (state, job_id) = state_with_job(true);
     let response = certificate_handler(
@@ -58,6 +73,11 @@ async fn certificate_handler_returns_completed_job_evidence() {
     assert_eq!(body["data"]["deviceModel"], "Detected API Model");
     assert_eq!(body["data"]["deviceSerial"], "DETECTED-API-SERIAL");
     assert_eq!(body["data"]["wipeMethod"], "overwrite_1_pass");
+    assert_eq!(
+        body["data"]["verification"]["strategy"],
+        "full_pattern_readback"
+    );
+    assert_eq!(body["data"]["verification"]["bytesChecked"], 8192);
     assert_eq!(body["data"]["evidenceHash"].as_str().unwrap().len(), 64);
     assert_eq!(body["signature"].as_str().unwrap().len(), 512);
     assert!(
@@ -73,16 +93,14 @@ async fn certificate_handler_returns_completed_job_evidence() {
         Ok(Json(CertRequest { job_id })),
     )
     .await;
-    let repeated_bytes = to_bytes(repeated.into_body(), usize::MAX)
-        .await
-        .unwrap();
+    let repeated_bytes = to_bytes(repeated.into_body(), usize::MAX).await.unwrap();
     let repeated_body: serde_json::Value = serde_json::from_slice(&repeated_bytes).unwrap();
     assert_eq!(repeated_body["signature"], body["signature"]);
     assert_eq!(state.certificates.list().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn certificate_handler_rejects_running_job() {
+async fn certificate_handler_rejects_unverified_job() {
     certificate::init_for_tests();
     let (state, job_id) = state_with_job(false);
     let response = certificate_handler(
@@ -95,7 +113,7 @@ async fn certificate_handler_rejects_running_job() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(body["error"].as_str().unwrap().contains("completed"));
+    assert!(body["error"].as_str().unwrap().contains("verified"));
 }
 
 #[tokio::test]

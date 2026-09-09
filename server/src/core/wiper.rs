@@ -157,18 +157,10 @@ pub fn get_wipe_methods_for_drive(drive: &Drive) -> Vec<WipeMethod> {
     }
 }
 
-/// NIST-compliant methods for mobile devices.
-pub fn get_wipe_methods_for_mobile(device: &MobileDevice) -> Vec<WipeMethod> {
-    match device.device_type.as_str() {
-        "Android" => vec![WipeMethod {
-            id: "android_factory_reset".to_string(),
-            name: "Clear: Factory Reset".to_string(),
-            description:
-                "Initiates the device's built-in factory data reset, as per NIST guidelines."
-                    .to_string(),
-        }],
-        _ => vec![],
-    }
+/// Mobile wiping remains unavailable until DZap can execute and verify a
+/// device-specific reset rather than merely rebooting into recovery.
+pub fn get_wipe_methods_for_mobile(_device: &MobileDevice) -> Vec<WipeMethod> {
+    Vec::new()
 }
 
 /// Returns the available wipe methods for a specific device.
@@ -447,6 +439,9 @@ pub(crate) fn overwrite_pass(
             }
         }
     }
+
+    file.sync_all()
+        .map_err(|error| format!("failed to flush pass {pass_num} to the device: {error}"))?;
 
     // Final progress update for the pass
     let final_progress = (pass_num as f64 * 100.0) / total_passes as f64;

@@ -1,7 +1,7 @@
 use server::core::drives::{BlockDependency, Drive, DriveType, MobileDevice};
 use server::core::preflight::{
-    PreflightCheckStatus, PreflightDecision, authorize_mobile_wipe, authorize_storage_wipe,
-    evaluate_ata_hidden_areas, evaluate_mobile_wipe, evaluate_storage_wipe,
+    PreflightCheckStatus, PreflightDecision, authorize_storage_wipe, evaluate_ata_hidden_areas,
+    evaluate_mobile_wipe, evaluate_storage_wipe,
 };
 use server::core::wiper::WipeConfig;
 
@@ -213,7 +213,7 @@ fn method_must_match_detected_drive_type() {
 }
 
 #[test]
-fn android_plan_validates_the_requested_method() {
+fn android_reset_is_blocked_until_it_can_be_verified() {
     let device = MobileDevice {
         name: "Pixel".to_string(),
         model: "Pixel 9".to_string(),
@@ -225,16 +225,6 @@ fn android_plan_validates_the_requested_method() {
     request.device_serial = "ANDROID-1".to_string();
     request.device_type = "Android".to_string();
 
-    let ready = evaluate_mobile_wipe(&request, &device);
-    assert_eq!(ready.decision, PreflightDecision::Ready);
-
-    request.expected_identity = ready.identity.clone();
-    assert_eq!(
-        authorize_mobile_wipe(&request, &device).decision,
-        PreflightDecision::Ready
-    );
-
-    request.method = "overwrite_1_pass".to_string();
     let blocked = evaluate_mobile_wipe(&request, &device);
     assert_eq!(blocked.decision, PreflightDecision::Blocked);
     assert_eq!(

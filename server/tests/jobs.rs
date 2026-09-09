@@ -1,6 +1,7 @@
 use server::core::drives::DeviceIdentity;
 use server::core::jobs::{JobStore, WipeJobStatus};
 use server::core::preflight::{PreflightCheck, PreflightCheckStatus, PreflightDecision, WipePlan};
+use server::core::verification::{VerificationResult, VerificationStrategy};
 use std::path::PathBuf;
 
 fn approved_plan() -> WipePlan {
@@ -37,8 +38,19 @@ fn temp_directory(test_name: &str) -> PathBuf {
     ))
 }
 
+fn verification() -> VerificationResult {
+    VerificationResult {
+        strategy: VerificationStrategy::FullPatternReadback,
+        bytes_checked: 1_048_576,
+        readback_sha256: "a".repeat(64),
+        expected_pattern: Some("0x00".to_string()),
+        firmware_status_sha256: None,
+        identity_revalidated: true,
+    }
+}
+
 #[test]
-fn completed_job_binds_approved_identity_and_lifecycle_to_evidence() {
+fn verified_job_binds_approved_identity_and_lifecycle_to_evidence() {
     let store = JobStore::in_memory();
     let created = store.create(&approved_plan()).unwrap();
 
@@ -50,19 +62,25 @@ fn completed_job_binds_approved_identity_and_lifecycle_to_evidence() {
     assert!(created.verify_evidence());
 
     let mut forged_completion = created.clone();
-    forged_completion.status = WipeJobStatus::Completed;
+    forged_completion.status = WipeJobStatus::Verified;
     forged_completion.completed_at = Some(created.started_at);
     assert!(!forged_completion.verify_evidence());
 
-    let completed = store.complete(&created.id).unwrap();
-    assert_eq!(completed.status, WipeJobStatus::Completed);
-    assert_eq!(completed.events.len(), 2);
-    assert_eq!(completed.events[1].event_type, "wipe_completed");
+    let verifying = store.begin_verification(&created.id).unwrap();
+    assert_eq!(verifying.status, WipeJobStatus::Verifying);
+    assert_eq!(verifying.events[1].event_type, "sanitization_completed");
+    let completed = store
+        .complete_verification(&created.id, verification())
+        .unwrap();
+    assert_eq!(completed.status, WipeJobStatus::Verified);
+    assert_eq!(completed.events.len(), 3);
+    assert_eq!(completed.events[2].event_type, "verification_completed");
     assert_eq!(
-        completed.events[1].previous_hash.as_deref(),
-        Some(created.evidence_hash.as_str())
+        completed.events[2].previous_hash.as_deref(),
+        Some(verifying.evidence_hash.as_str())
     );
-    assert_eq!(completed.evidence_hash, completed.events[1].event_hash);
+    assert_eq!(completed.evidence_hash, completed.events[2].event_hash);
+    assert_eq!(completed.verification, Some(verification()));
     assert!(completed.verify_evidence());
 }
 
@@ -72,7 +90,7 @@ fn terminal_job_cannot_be_rewritten() {
     let job = store.create(&approved_plan()).unwrap();
     store.fail(&job.id, "device disappeared").unwrap();
 
-    let error = store.complete(&job.id).unwrap_err();
+    let error = store.fail(&job.id, "second failure").unwrap_err();
     assert!(error.contains("already terminal"), "unexpected: {error}");
     let failed = store.get(&job.id).unwrap().unwrap();
     assert_eq!(failed.status, WipeJobStatus::Failed);
@@ -81,11 +99,31 @@ fn terminal_job_cannot_be_rewritten() {
 }
 
 #[test]
+fn malformed_verification_cannot_make_a_job_verified() {
+    let store = JobStore::in_memory();
+    let job = store.create(&approved_plan()).unwrap();
+    store.begin_verification(&job.id).unwrap();
+
+    let mut malformed = verification();
+    malformed.identity_revalidated = false;
+    let error = store.complete_verification(&job.id, malformed).unwrap_err();
+
+    assert!(error.contains("did not revalidate the device identity"));
+    let unchanged = store.get(&job.id).unwrap().unwrap();
+    assert_eq!(unchanged.status, WipeJobStatus::Verifying);
+    assert!(unchanged.verification.is_none());
+    assert!(unchanged.verify_evidence());
+}
+
+#[test]
 fn persisted_jobs_detect_tampering() {
     let directory = temp_directory("tampered-evidence");
     let store = JobStore::persistent(directory.clone()).unwrap();
     let job = store.create(&approved_plan()).unwrap();
-    store.complete(&job.id).unwrap();
+    store.begin_verification(&job.id).unwrap();
+    store
+        .complete_verification(&job.id, verification())
+        .unwrap();
 
     let path = directory.join(format!("{}.json", job.id));
     let original = std::fs::read_to_string(&path).unwrap();

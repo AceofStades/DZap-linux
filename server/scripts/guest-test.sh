@@ -96,18 +96,20 @@ log "PASS overwrite_1_pass zeroed the entire virtual disk"
 
 # The device contents can become observable just before the worker records its
 # terminal evidence event. Wait for that server-owned completion record.
-JOB_COMPLETE=0
+JOB_VERIFIED=0
 for i in $(seq 1 15); do
     JOB=$(http_get "$BASE/api/wipe/jobs/$JOB_ID") || fail "GET wipe job failed"
-    if echo "$JOB" | grep -q '"status":"completed"'; then
-        JOB_COMPLETE=1
+    if echo "$JOB" | grep -q '"status":"verified"'; then
+        JOB_VERIFIED=1
         break
     fi
     sleep 1
 done
-[ "$JOB_COMPLETE" = 1 ] || fail "wipe job did not record completion: $JOB"
+[ "$JOB_VERIFIED" = 1 ] || fail "wipe job did not record verification: $JOB"
 echo "$JOB" | grep -Eq '"evidenceHash":"[0-9a-f]{64}"' || fail "wipe job missing evidence hash: $JOB"
-log "PASS server recorded hash-chained wipe evidence"
+echo "$JOB" | grep -q '"strategy":"full_pattern_readback"' || fail "wipe job missing full readback evidence: $JOB"
+echo "$JOB" | grep -q '"bytesChecked":67108864' || fail "wipe job did not verify the full virtual disk: $JOB"
+log "PASS server recorded full-readback hash-chained wipe evidence"
 
 # --- Test 4: certificate endpoint --------------------------------------------
 CERT_REQUEST=$(printf '{"jobId":"%s"}' "$JOB_ID")

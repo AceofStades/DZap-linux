@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::drives::log_line;
 use super::jobs::{WipeJob, WipeJobStatus};
+use super::verification::VerificationResult;
 
 static APP_PRIVATE_KEY: OnceLock<RsaPrivateKey> = OnceLock::new();
 
@@ -106,6 +107,7 @@ pub struct CertificateData {
     pub started_at: DateTime<Utc>,
     pub completed_at: DateTime<Utc>,
     pub timestamp: DateTime<Utc>,
+    pub verification: VerificationResult,
     pub evidence_hash: String,
 }
 
@@ -122,15 +124,19 @@ pub struct SignedCertificate {
 }
 
 pub fn generate_certificate_for_job(job: &WipeJob) -> Result<SignedCertificate, String> {
-    if job.status != WipeJobStatus::Completed {
-        return Err("certificate requires a completed wipe job".to_string());
+    if job.status != WipeJobStatus::Verified {
+        return Err("certificate requires a verified wipe job".to_string());
     }
     if !job.verify_evidence() {
         return Err("wipe job evidence verification failed".to_string());
     }
     let completed_at = job
         .completed_at
-        .ok_or_else(|| "completed wipe job has no completion timestamp".to_string())?;
+        .ok_or_else(|| "verified wipe job has no completion timestamp".to_string())?;
+    let verification = job
+        .verification
+        .clone()
+        .ok_or_else(|| "verified wipe job has no verification result".to_string())?;
     let cert_data = CertificateData {
         job_id: job.id.clone(),
         device_path: job.device_path.clone(),
@@ -145,6 +151,7 @@ pub fn generate_certificate_for_job(job: &WipeJob) -> Result<SignedCertificate, 
         started_at: job.started_at,
         completed_at,
         timestamp: Utc::now(),
+        verification,
         evidence_hash: job.evidence_hash.clone(),
     };
 
@@ -204,7 +211,7 @@ impl SignedCertificate {
     }
 
     pub fn matches_job(&self, job: &WipeJob) -> bool {
-        job.status == WipeJobStatus::Completed
+        job.status == WipeJobStatus::Verified
             && job.completed_at == Some(self.data.completed_at)
             && self.data.job_id == job.id
             && self.data.device_path == job.device_path
@@ -217,6 +224,7 @@ impl SignedCertificate {
             && self.data.device_type == job.device_type
             && self.data.wipe_method == job.method
             && self.data.started_at == job.started_at
+            && job.verification.as_ref() == Some(&self.data.verification)
             && self.data.evidence_hash == job.evidence_hash
     }
 }
@@ -481,6 +489,37 @@ impl SignedCertificate {
         c.text("F3", 8.0, 50.0, 66.0, &self.data.job_id);
         c.text("F1", 10.0, 10.0, 74.0, "Evidence Hash:");
         c.text("F3", 7.0, 50.0, 74.0, &self.data.evidence_hash);
+        c.text("F1", 9.0, 10.0, 82.0, "Verification:");
+        c.text(
+            "F2",
+            9.0,
+            50.0,
+            82.0,
+            &format!(
+                "{:?}, {} bytes checked",
+                self.data.verification.strategy, self.data.verification.bytes_checked
+            ),
+        );
+        c.text("F1", 9.0, 10.0, 90.0, "Readback SHA-256:");
+        c.text(
+            "F3",
+            7.0,
+            50.0,
+            90.0,
+            &self.data.verification.readback_sha256,
+        );
+        c.text("F1", 9.0, 10.0, 98.0, "Identity Revalidated:");
+        c.text(
+            "F2",
+            9.0,
+            50.0,
+            98.0,
+            if self.data.verification.identity_revalidated {
+                "Yes"
+            } else {
+                "No"
+            },
+        );
 
         // --- QR Code for Verification ---
         let generated_qr;
@@ -515,7 +554,7 @@ impl SignedCertificate {
         c.text("F4", 9.0, 150.0, 72.0, "Scan to Verify");
 
         // --- Digital Signature ---
-        let mut y = 105.0;
+        let mut y = 113.0;
         c.text("F1", 10.0, 10.0, y, "Digital Signature (SHA256withRSA):");
         y += 5.0;
         let sig_lines = wrap_mono(&self.signature, 8.0, 186.0);

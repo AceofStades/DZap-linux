@@ -2,6 +2,7 @@ use crate::core::certificate::*;
 use crate::core::drives::DeviceIdentity;
 use crate::core::jobs::JobStore;
 use crate::core::preflight::{PreflightDecision, WipePlan};
+use crate::core::verification::{VerificationResult, VerificationStrategy};
 use chrono::{TimeZone, Utc};
 
 fn completed_job(model: &str, serial: &str, method: &str) -> crate::core::jobs::WipeJob {
@@ -24,7 +25,34 @@ fn completed_job(model: &str, serial: &str, method: &str) -> crate::core::jobs::
             checks: Vec::new(),
         })
         .unwrap();
-    store.complete(&created.id).unwrap()
+    store.begin_verification(&created.id).unwrap();
+    store
+        .complete_verification(&created.id, verification(method))
+        .unwrap()
+}
+
+fn verification(method: &str) -> VerificationResult {
+    let mut result = VerificationResult {
+        strategy: match method {
+            "sata_secure_erase" => VerificationStrategy::AtaSecurityStatusAndSamples,
+            "nvme_format" => VerificationStrategy::NvmeFormatStatusAndSamples,
+            _ => VerificationStrategy::FullPatternReadback,
+        },
+        bytes_checked: 4096,
+        readback_sha256: "a".repeat(64),
+        expected_pattern: match method {
+            "overwrite_1_pass" => Some("0x00".to_string()),
+            "overwrite_2_pass" => Some("0xAA".to_string()),
+            "overwrite_3_pass" => Some("0x55".to_string()),
+            _ => None,
+        },
+        firmware_status_sha256: None,
+        identity_revalidated: true,
+    };
+    if matches!(method, "sata_secure_erase" | "nvme_format") {
+        result.firmware_status_sha256 = Some("b".repeat(64));
+    }
+    result
 }
 
 #[test]
@@ -43,6 +71,7 @@ fn hash_covers_the_complete_certificate_record() {
         started_at: Utc.with_ymd_and_hms(2025, 1, 15, 10, 0, 0).unwrap(),
         completed_at: Utc.with_ymd_and_hms(2025, 1, 15, 10, 29, 0).unwrap(),
         timestamp: Utc.with_ymd_and_hms(2025, 1, 15, 10, 30, 0).unwrap(),
+        verification: verification("overwrite_1_pass"),
         evidence_hash: "abc123".to_string(),
     };
     let hash = hash_certificate_data(&data);
@@ -50,7 +79,7 @@ fn hash_covers_the_complete_certificate_record() {
 
     use sha2::{Digest, Sha256};
     let expected = Sha256::digest(
-        br#"{"jobId":"job-test","devicePath":"/dev/test","deviceModel":"Samsung SSD 980","deviceSerial":"S123456","deviceWwn":"0x1234","deviceSizeBytes":"4096","deviceTransport":"nvme","deviceMajorMinor":"259:0","deviceType":"NVMe SSD","wipeMethod":"overwrite_1_pass","startedAt":"2025-01-15T10:00:00Z","completedAt":"2025-01-15T10:29:00Z","timestamp":"2025-01-15T10:30:00Z","evidenceHash":"abc123"}"#,
+        br#"{"jobId":"job-test","devicePath":"/dev/test","deviceModel":"Samsung SSD 980","deviceSerial":"S123456","deviceWwn":"0x1234","deviceSizeBytes":"4096","deviceTransport":"nvme","deviceMajorMinor":"259:0","deviceType":"NVMe SSD","wipeMethod":"overwrite_1_pass","startedAt":"2025-01-15T10:00:00Z","completedAt":"2025-01-15T10:29:00Z","timestamp":"2025-01-15T10:30:00Z","verification":{"strategy":"full_pattern_readback","bytesChecked":4096,"readbackSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedPattern":"0x00","firmwareStatusSha256":null,"identityRevalidated":true},"evidenceHash":"abc123"}"#,
     );
     assert_eq!(hash, expected.to_vec());
 }
@@ -84,6 +113,7 @@ fn certificate_json_contains_job_owned_evidence() {
         "startedAt",
         "completedAt",
         "timestamp",
+        "verification",
         "evidenceHash",
     ] {
         assert!(data.get(key).is_some(), "missing key {key} in {data}");
@@ -149,7 +179,7 @@ fn certificate_requires_terminal_untampered_job_evidence() {
         Ok(_) => panic!("running job received a certificate"),
         Err(error) => error,
     };
-    assert!(error.contains("completed"));
+    assert!(error.contains("verified"));
 
     let mut changed = job;
     changed.method = "overwrite_3_pass".to_string();
@@ -183,6 +213,9 @@ fn pdf_is_well_formed_and_contains_certificate_content() {
         "Device Serial:",
         "PdfSerial",
         "Evidence Hash:",
+        "Verification:",
+        "Readback SHA-256:",
+        "Identity Revalidated:",
         "Digital Signature",
         "Public Key:",
         "Scan to Verify",

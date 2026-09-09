@@ -3,6 +3,7 @@ pub mod drives;
 pub mod jobs;
 pub mod predict;
 pub mod preflight;
+pub mod verification;
 pub mod wiper;
 
 #[cfg(test)]

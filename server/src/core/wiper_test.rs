@@ -69,20 +69,13 @@ fn methods_per_drive_type_match_nist_table() {
 }
 
 #[test]
-fn mobile_methods_are_available_only_for_android() {
-    let mut device = MobileDevice {
+fn mobile_methods_are_blocked_without_verifiable_reset_support() {
+    let device = MobileDevice {
         name: "Pixel".to_string(),
         model: "Pixel".to_string(),
         serial: "SERIAL".to_string(),
         device_type: "Android".to_string(),
     };
-    let methods = get_wipe_methods_for_mobile(&device);
-    assert_eq!(methods.len(), 1);
-    assert_eq!(methods[0].id, "android_factory_reset");
-    assert_eq!(methods[0].name, "Clear: Factory Reset");
-    assert!(!methods[0].description.is_empty());
-
-    device.device_type = "iOS".to_string();
     assert!(get_wipe_methods_for_mobile(&device).is_empty());
 }
 

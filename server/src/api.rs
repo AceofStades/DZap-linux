@@ -7,7 +7,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::AppState;
-use crate::core::{certificate, drives, jobs::WipeJobStatus, predict, preflight, wiper};
+use crate::core::{
+    certificate, drives, jobs::WipeJobStatus, predict, preflight, verification, wiper,
+};
 
 /// Helper to ensure all error responses are in a consistent JSON format.
 fn error_response(code: StatusCode, message: &str) -> Response {
@@ -92,6 +94,7 @@ pub async fn wipe_drive_handler(
     };
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let device_path = config.device_path.clone();
+    let verification_config = config.clone();
     let job_id = job.id.clone();
     let task_job_id = job_id.clone();
     tokio::spawn(async move {
@@ -129,28 +132,80 @@ pub async fn wipe_drive_handler(
                     .to_string(),
                 );
             }
-            Ok(()) => match state.jobs.complete(&task_job_id) {
-                Ok(completed) => state.hub.broadcast(
+            Ok(()) => {
+                if let Err(error) = state.jobs.begin_verification(&task_job_id) {
+                    state.hub.broadcast(
+                        json!({
+                            "status": "failed",
+                            "jobId": task_job_id,
+                            "deviceId": device_path,
+                            "error": format!(
+                                "Wipe command completed, but verification evidence could not be started: {error}"
+                            ),
+                        })
+                        .to_string(),
+                    );
+                    return;
+                }
+                state.hub.broadcast(
                     json!({
-                        "status": "completed",
+                        "status": "verifying",
                         "jobId": task_job_id,
                         "deviceId": device_path,
-                        "evidenceHash": completed.evidence_hash,
                     })
                     .to_string(),
-                ),
-                Err(error) => state.hub.broadcast(
-                    json!({
-                        "status": "failed",
-                        "jobId": task_job_id,
-                        "deviceId": device_path,
-                        "error": format!(
-                            "Wipe completed, but completion evidence could not be recorded: {error}"
+                );
+
+                let verification = tokio::task::spawn_blocking(move || {
+                    verification::verify_wipe(&verification_config)
+                })
+                .await
+                .unwrap_or_else(|error| Err(format!("verification worker failed: {error}")));
+                match verification {
+                    Ok(result) => match state
+                        .jobs
+                        .complete_verification(&task_job_id, result.clone())
+                    {
+                        Ok(completed) => state.hub.broadcast(
+                            json!({
+                                "status": "verified",
+                                "jobId": task_job_id,
+                                "deviceId": device_path,
+                                "evidenceHash": completed.evidence_hash,
+                                "verification": result,
+                            })
+                            .to_string(),
                         ),
-                    })
-                    .to_string(),
-                ),
-            },
+                        Err(error) => state.hub.broadcast(
+                            json!({
+                                "status": "failed",
+                                "jobId": task_job_id,
+                                "deviceId": device_path,
+                                "error": format!(
+                                    "Wipe was verified, but final evidence could not be recorded: {error}"
+                                ),
+                            })
+                            .to_string(),
+                        ),
+                    },
+                    Err(error) => {
+                        let evidence_error = state.jobs.fail(&task_job_id, &error).err();
+                        state.hub.broadcast(
+                            json!({
+                                "status": "failed",
+                                "jobId": task_job_id,
+                                "deviceId": device_path,
+                                "error": evidence_error
+                                    .map(|record_error| {
+                                        format!("{error}; evidence error: {record_error}")
+                                    })
+                                    .unwrap_or(error),
+                            })
+                            .to_string(),
+                        );
+                    }
+                }
+            }
         }
     });
 
@@ -399,10 +454,10 @@ pub async fn certificate_handler(
             );
         }
     };
-    if job.status != WipeJobStatus::Completed {
+    if job.status != WipeJobStatus::Verified {
         return error_response(
             StatusCode::CONFLICT,
-            "Certificate requires a successfully completed wipe job",
+            "Certificate requires a successfully verified wipe job",
         );
     }
     if !job.verify_evidence() {

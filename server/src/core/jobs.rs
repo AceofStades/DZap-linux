@@ -9,12 +9,14 @@ use std::sync::{Arc, Mutex};
 
 use super::drives::DeviceIdentity;
 use super::preflight::WipePlan;
+use super::verification::VerificationResult;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WipeJobStatus {
     Running,
-    Completed,
+    Verifying,
+    Verified,
     Failed,
 }
 
@@ -40,8 +42,10 @@ pub struct WipeJob {
     pub method: String,
     pub status: WipeJobStatus,
     pub started_at: DateTime<Utc>,
+    pub sanitization_completed_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure: Option<String>,
+    pub verification: Option<VerificationResult>,
     pub evidence_hash: String,
     pub events: Vec<EvidenceEvent>,
 }
@@ -73,18 +77,49 @@ impl WipeJob {
         };
         match self.status {
             WipeJobStatus::Running => {
-                self.events.len() == 1 && self.completed_at.is_none() && self.failure.is_none()
+                self.events.len() == 1
+                    && self.sanitization_completed_at.is_none()
+                    && self.completed_at.is_none()
+                    && self.failure.is_none()
+                    && self.verification.is_none()
             }
-            WipeJobStatus::Completed => {
-                last.event_type == "wipe_completed"
+            WipeJobStatus::Verifying => {
+                self.events.len() == 2
+                    && last.event_type == "sanitization_completed"
+                    && self.sanitization_completed_at == Some(last.timestamp)
+                    && self.completed_at.is_none()
+                    && self.failure.is_none()
+                    && self.verification.is_none()
+            }
+            WipeJobStatus::Verified => self.verification.as_ref().is_some_and(|verification| {
+                self.events.len() == 3
+                    && self.events[1].event_type == "sanitization_completed"
+                    && self.sanitization_completed_at == Some(self.events[1].timestamp)
+                    && last.event_type == "verification_completed"
                     && self.completed_at == Some(last.timestamp)
                     && self.failure.is_none()
-            }
-            WipeJobStatus::Failed => self.failure.as_ref().is_some_and(|failure| {
-                last.event_type == "wipe_failed"
-                    && self.completed_at == Some(last.timestamp)
-                    && last.message == format!("The sanitization operation failed: {failure}")
+                    && serde_json::to_string(verification).is_ok_and(|encoded| {
+                        last.message == format!("Wipe verification passed: {encoded}")
+                    })
             }),
+            WipeJobStatus::Failed => {
+                let expected_events = if self.sanitization_completed_at.is_some() {
+                    3
+                } else {
+                    2
+                };
+                self.failure.as_ref().is_some_and(|failure| {
+                    self.events.len() == expected_events
+                        && self.sanitization_completed_at.is_none_or(|timestamp| {
+                            self.events[1].event_type == "sanitization_completed"
+                                && self.events[1].timestamp == timestamp
+                        })
+                        && last.event_type == "wipe_failed"
+                        && self.completed_at == Some(last.timestamp)
+                        && self.verification.is_none()
+                        && last.message == format!("The wipe operation failed: {failure}")
+                })
+            }
         }
     }
 }
@@ -169,8 +204,10 @@ impl JobStore {
             method: plan.method.clone(),
             status: WipeJobStatus::Running,
             started_at: now,
+            sanitization_completed_at: None,
             completed_at: None,
             failure: None,
+            verification: None,
             evidence_hash: String::new(),
             events: Vec::new(),
         };
@@ -212,34 +249,7 @@ impl JobStore {
         Ok(jobs)
     }
 
-    pub fn complete(&self, id: &str) -> Result<WipeJob, String> {
-        self.finish(
-            id,
-            WipeJobStatus::Completed,
-            "wipe_completed",
-            "The sanitization operation completed successfully.".to_string(),
-            None,
-        )
-    }
-
-    pub fn fail(&self, id: &str, error: &str) -> Result<WipeJob, String> {
-        self.finish(
-            id,
-            WipeJobStatus::Failed,
-            "wipe_failed",
-            format!("The sanitization operation failed: {error}"),
-            Some(error.to_string()),
-        )
-    }
-
-    fn finish(
-        &self,
-        id: &str,
-        status: WipeJobStatus,
-        event_type: &str,
-        message: String,
-        failure: Option<String>,
-    ) -> Result<WipeJob, String> {
+    pub fn begin_verification(&self, id: &str) -> Result<WipeJob, String> {
         let mut jobs = self
             .jobs
             .lock()
@@ -248,15 +258,94 @@ impl JobStore {
             .get(id)
             .ok_or_else(|| format!("wipe job {id} was not found"))?;
         if current.status != WipeJobStatus::Running {
+            return Err(format!("wipe job {id} is not running"));
+        }
+
+        let mut updated = current.clone();
+        let now = Utc::now();
+        updated.status = WipeJobStatus::Verifying;
+        updated.sanitization_completed_at = Some(now);
+        append_event_at(
+            &mut updated,
+            now,
+            "sanitization_completed",
+            "The sanitization command completed; readback verification started.".to_string(),
+        );
+        self.persist(&updated)?;
+        jobs.insert(id.to_string(), updated.clone());
+        Ok(updated)
+    }
+
+    pub fn complete_verification(
+        &self,
+        id: &str,
+        verification: VerificationResult,
+    ) -> Result<WipeJob, String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| "wipe job store lock was poisoned".to_string())?;
+        let current = jobs
+            .get(id)
+            .ok_or_else(|| format!("wipe job {id} was not found"))?;
+        if current.status != WipeJobStatus::Verifying {
+            return Err(format!("wipe job {id} is not awaiting verification"));
+        }
+
+        let expected_size = current
+            .identity
+            .size_bytes
+            .parse::<u64>()
+            .map_err(|error| format!("approved device size is invalid: {error}"))?;
+        verification
+            .validate_for_job(&current.method, expected_size)
+            .map_err(|error| format!("invalid wipe verification evidence: {error}"))?;
+
+        let encoded = serde_json::to_string(&verification)
+            .map_err(|error| format!("failed to encode verification evidence: {error}"))?;
+        let mut updated = current.clone();
+        let now = Utc::now();
+        updated.status = WipeJobStatus::Verified;
+        updated.completed_at = Some(now);
+        updated.verification = Some(verification);
+        append_event_at(
+            &mut updated,
+            now,
+            "verification_completed",
+            format!("Wipe verification passed: {encoded}"),
+        );
+        self.persist(&updated)?;
+        jobs.insert(id.to_string(), updated.clone());
+        Ok(updated)
+    }
+
+    pub fn fail(&self, id: &str, error: &str) -> Result<WipeJob, String> {
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| "wipe job store lock was poisoned".to_string())?;
+        let current = jobs
+            .get(id)
+            .ok_or_else(|| format!("wipe job {id} was not found"))?;
+        if !matches!(
+            current.status,
+            WipeJobStatus::Running | WipeJobStatus::Verifying
+        ) {
             return Err(format!("wipe job {id} is already terminal"));
         }
 
         let mut updated = current.clone();
         let now = Utc::now();
-        updated.status = status;
+        updated.status = WipeJobStatus::Failed;
         updated.completed_at = Some(now);
-        updated.failure = failure;
-        append_event_at(&mut updated, now, event_type, message);
+        updated.failure = Some(error.to_string());
+        updated.verification = None;
+        append_event_at(
+            &mut updated,
+            now,
+            "wipe_failed",
+            format!("The wipe operation failed: {error}"),
+        );
         self.persist(&updated)?;
         jobs.insert(id.to_string(), updated.clone());
         Ok(updated)
@@ -268,13 +357,18 @@ impl JobStore {
             .lock()
             .map_err(|_| "wipe job store lock was poisoned".to_string())?
             .values()
-            .filter(|job| job.status == WipeJobStatus::Running)
+            .filter(|job| {
+                matches!(
+                    job.status,
+                    WipeJobStatus::Running | WipeJobStatus::Verifying
+                )
+            })
             .map(|job| job.id.clone())
             .collect();
         for id in ids {
             self.fail(
                 &id,
-                "backend restarted before completion evidence was recorded",
+                "backend restarted before terminal evidence was recorded",
             )?;
         }
         Ok(())
