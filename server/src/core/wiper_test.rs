@@ -24,6 +24,18 @@ fn drive(drive_type: DriveType) -> Drive {
 fn wipe_method_names_match_go() {
     assert_eq!(wipe_method_name("nvme_format"), "Purge: NVMe Format");
     assert_eq!(
+        wipe_method_name("nvme_sanitize_crypto"),
+        "Purge: NVMe Sanitize (Crypto Erase)"
+    );
+    assert_eq!(
+        wipe_method_name("nvme_sanitize_block"),
+        "Purge: NVMe Sanitize (Block Erase)"
+    );
+    assert_eq!(
+        wipe_method_name("nvme_sanitize_overwrite"),
+        "Purge: NVMe Sanitize (Overwrite)"
+    );
+    assert_eq!(
         wipe_method_name("overwrite_1_pass"),
         "Clear: 1-Pass Overwrite"
     );
@@ -54,7 +66,16 @@ fn methods_per_drive_type_match_nist_table() {
             .map(|m| m.id)
             .collect()
     };
-    assert_eq!(ids_of(DriveType::Nvme), ["nvme_format", "overwrite_1_pass"]);
+    assert_eq!(
+        ids_of(DriveType::Nvme),
+        [
+            "nvme_sanitize_crypto",
+            "nvme_sanitize_block",
+            "nvme_sanitize_overwrite",
+            "nvme_format",
+            "overwrite_1_pass"
+        ]
+    );
     assert_eq!(
         ids_of(DriveType::Ssd),
         ["sata_secure_erase", "overwrite_1_pass"]
@@ -225,6 +246,25 @@ fn pause_and_abort_unknown_devices_error() {
     assert!(err.contains("no active wipe found"), "got: {err}");
     let err = abort_wipe("/dev/definitely-not-wiping").unwrap_err();
     assert!(err.contains("no active wipe found"), "got: {err}");
+}
+
+#[test]
+fn command_runner_drains_output_while_the_process_is_running() {
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_cancel = cancel.clone();
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run_command(&worker_cancel, "sh", &["-c", "head -c 1048576 /dev/zero"]);
+        let _ = result_tx.send(result);
+    });
+
+    match result_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(result) => result.unwrap(),
+        Err(error) => {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            panic!("command runner blocked on a full output pipe: {error}");
+        }
+    }
 }
 
 #[test]

@@ -3,6 +3,7 @@ use super::drives::{
     DeviceIdentity, Drive, DriveType, MobileDevice, detect_android_devices, detect_storage_drives,
     log_line,
 };
+use super::nvme::{self, NvmeSanitizeAction};
 use super::preflight::authorize_wipe;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -96,6 +97,9 @@ pub struct WipeMethod {
 pub(crate) fn wipe_method_name(method_id: &str) -> &'static str {
     match method_id {
         "nvme_format" => "Purge: NVMe Format",
+        "nvme_sanitize_crypto" => "Purge: NVMe Sanitize (Crypto Erase)",
+        "nvme_sanitize_block" => "Purge: NVMe Sanitize (Block Erase)",
+        "nvme_sanitize_overwrite" => "Purge: NVMe Sanitize (Overwrite)",
         "overwrite_1_pass" => "Clear: 1-Pass Overwrite",
         "sata_secure_erase" => "Purge: ATA Secure Erase",
         "overwrite_3_pass" => "Purge: 3-Pass Overwrite",
@@ -113,18 +117,35 @@ pub fn get_wipe_methods_for_drive(drive: &Drive) -> Vec<WipeMethod> {
         description: desc.to_string(),
     };
     match drive.drive_type {
-        DriveType::Nvme => vec![
-            m(
-                "nvme_format",
-                "Purge: NVMe Format",
-                "Uses the drive's built-in, high-speed firmware command (NVM Express Format).",
-            ),
-            m(
-                "overwrite_1_pass",
-                "Clear: Overwrite",
-                "Not fully effective for flash media due to wear-leveling and over-provisioning.",
-            ),
-        ],
+        DriveType::Nvme => {
+            let mut methods = [
+                NvmeSanitizeAction::CryptoErase,
+                NvmeSanitizeAction::BlockErase,
+                NvmeSanitizeAction::Overwrite,
+            ]
+            .into_iter()
+            .map(|action| {
+                m(
+                    action.method_id(),
+                    action.display_name(),
+                    action.description(),
+                )
+            })
+            .collect::<Vec<_>>();
+            methods.extend([
+                m(
+                    "nvme_format",
+                    "Purge: NVMe Format",
+                    "Uses the drive's built-in, high-speed firmware command (NVM Express Format).",
+                ),
+                m(
+                    "overwrite_1_pass",
+                    "Clear: Overwrite",
+                    "Not fully effective for flash media due to wear-leveling and over-provisioning.",
+                ),
+            ]);
+            methods
+        }
         DriveType::Ssd => vec![
             m(
                 "sata_secure_erase",
@@ -169,7 +190,16 @@ pub fn get_wipe_methods(device_path: &str) -> Result<Vec<WipeMethod>, String> {
 
     for drive in &drives {
         if drive.name == device_path {
-            return Ok(get_wipe_methods_for_drive(drive));
+            let mut methods = get_wipe_methods_for_drive(drive);
+            if drive.drive_type == DriveType::Nvme {
+                let capabilities = nvme::probe_sanitize_capabilities(&drive.name).ok();
+                methods.retain(|method| {
+                    NvmeSanitizeAction::from_method_id(&method.id).is_none_or(|action| {
+                        capabilities.is_some_and(|capabilities| capabilities.supports(action))
+                    })
+                });
+            }
+            return Ok(methods);
         }
     }
 
@@ -214,8 +244,11 @@ fn sanitize_storage_drive(
     config: WipeConfig,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(), String> {
+    if let Some(action) = NvmeSanitizeAction::from_method_id(&config.method) {
+        return sanitize_nvme(&config.device_path, action, progress);
+    }
     match config.method.as_str() {
-        "nvme_format" => sanitize_nvme(&config.device_path, progress),
+        "nvme_format" => sanitize_nvme_format(&config.device_path, progress),
         "sata_secure_erase" => sanitize_sata(&config.device_path, progress),
         "overwrite_1_pass" => sanitize_overwrite(config, 1, progress),
         "overwrite_3_pass" => sanitize_overwrite(config, 3, progress),
@@ -260,7 +293,11 @@ where
     Ok(())
 }
 
-fn run_command(cancel: &Arc<AtomicBool>, name: &str, args: &[&str]) -> Result<(), String> {
+pub(crate) fn run_command(
+    cancel: &Arc<AtomicBool>,
+    name: &str,
+    args: &[&str],
+) -> Result<(), String> {
     // Prepend ionice to the command to set I/O scheduling class to Idle
     let mut child = Command::new("ionice")
         .arg("-c")
@@ -271,32 +308,68 @@ fn run_command(cancel: &Arc<AtomicBool>, name: &str, args: &[&str]) -> Result<()
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("command {name} failed to start: {e}"))?;
+    let mut stdout_reader = child
+        .stdout
+        .take()
+        .map(|output| std::thread::spawn(move || drain_command_output(output)));
+    let mut stderr_reader = child
+        .stderr
+        .take()
+        .map(|output| std::thread::spawn(move || drain_command_output(output)));
 
     // Poll the child so we can honour cancellation like Go's CommandContext.
     loop {
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
+            collect_child_output(&mut stdout_reader, &mut stderr_reader);
             return Err("wipe aborted".to_string());
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut out = String::new();
-                if let Some(mut stdout) = child.stdout.take() {
-                    let _ = stdout.read_to_string(&mut out);
-                }
-                if let Some(mut stderr) = child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut out);
-                }
+                let out = collect_child_output(&mut stdout_reader, &mut stderr_reader);
                 if status.success() {
                     return Ok(());
                 }
                 return Err(format!("command {name} failed: {status}. Output: {out}"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(e) => return Err(format!("command {name} failed: {e}")),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                collect_child_output(&mut stdout_reader, &mut stderr_reader);
+                return Err(format!("command {name} failed: {e}"));
+            }
         }
     }
+}
+
+fn drain_command_output(mut reader: impl Read) -> Vec<u8> {
+    const MAX_CAPTURED_BYTES: usize = 64 * 1024;
+    let mut captured = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        let remaining = MAX_CAPTURED_BYTES.saturating_sub(captured.len());
+        captured.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    captured
+}
+
+fn collect_child_output(
+    stdout: &mut Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr: &mut Option<std::thread::JoinHandle<Vec<u8>>>,
+) -> String {
+    let mut output = stdout
+        .take()
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    if let Some(mut error) = stderr.take().and_then(|reader| reader.join().ok()) {
+        output.append(&mut error);
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 pub(crate) fn register_wipe(device_path: &str) -> Arc<WipeControls> {
@@ -316,6 +389,21 @@ fn unregister_wipe(device_path: &str) {
 }
 
 fn sanitize_nvme(
+    path: &str,
+    action: NvmeSanitizeAction,
+    progress: &tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<(), String> {
+    let capabilities = nvme::probe_sanitize_capabilities(path)?;
+    let arguments = nvme::sanitize_arguments(path, action, capabilities)?;
+    let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    let _ = progress.send(format!("Executing {}...", action.display_name()));
+    let controls = register_wipe(path);
+    let result = run_command(&controls.cancel, "nvme", &argument_refs);
+    unregister_wipe(path);
+    result
+}
+
+fn sanitize_nvme_format(
     path: &str,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(), String> {

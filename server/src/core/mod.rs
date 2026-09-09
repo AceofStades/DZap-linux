@@ -1,6 +1,7 @@
 pub mod certificate;
 pub mod drives;
 pub mod jobs;
+pub mod nvme;
 pub mod predict;
 pub mod preflight;
 pub mod verification;

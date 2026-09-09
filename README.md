@@ -22,6 +22,8 @@ Dependencies:
 util-linux
 smartmontools
 android-tools
+hdparm
+nvme-cli
 ```
 
 Node Dependencies:

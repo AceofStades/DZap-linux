@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::drives::detect_storage_drives;
+use super::nvme::{self, NvmeSanitizeAction};
 use super::wiper::WipeConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +15,7 @@ pub enum VerificationStrategy {
     FullPatternReadback,
     AtaSecurityStatusAndSamples,
     NvmeFormatStatusAndSamples,
+    NvmeSanitizeStatusAndSamples,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,11 +58,17 @@ impl VerificationResult {
                     ));
                 }
             }
-            "sata_secure_erase" | "nvme_format" => {
+            "sata_secure_erase"
+            | "nvme_format"
+            | "nvme_sanitize_crypto"
+            | "nvme_sanitize_block"
+            | "nvme_sanitize_overwrite" => {
                 let expected_strategy = if method == "sata_secure_erase" {
                     VerificationStrategy::AtaSecurityStatusAndSamples
-                } else {
+                } else if method == "nvme_format" {
                     VerificationStrategy::NvmeFormatStatusAndSamples
+                } else {
+                    VerificationStrategy::NvmeSanitizeStatusAndSamples
                 };
                 let sample_size = expected_size.min(64 * 1024);
                 let final_offset = expected_size - sample_size;
@@ -123,15 +131,19 @@ pub fn verify_wipe(config: &WipeConfig) -> Result<VerificationResult, String> {
         return Err("cannot verify a zero-length device".to_string());
     }
 
-    let mut result = match config.method.as_str() {
-        "overwrite_1_pass" => verify_pattern_file(&config.device_path, expected_size, 0x00),
-        "overwrite_2_pass" => verify_pattern_file(&config.device_path, expected_size, 0xAA),
-        "overwrite_3_pass" => verify_pattern_file(&config.device_path, expected_size, 0x55),
-        "sata_secure_erase" => verify_ata_erase(&config.device_path, expected_size),
-        "nvme_format" => verify_nvme_format(&config.device_path, expected_size),
-        method => Err(format!(
-            "no verification strategy exists for method {method}"
-        )),
+    let mut result = if let Some(action) = NvmeSanitizeAction::from_method_id(&config.method) {
+        verify_nvme_sanitize(&config.device_path, expected_size, action)
+    } else {
+        match config.method.as_str() {
+            "overwrite_1_pass" => verify_pattern_file(&config.device_path, expected_size, 0x00),
+            "overwrite_2_pass" => verify_pattern_file(&config.device_path, expected_size, 0xAA),
+            "overwrite_3_pass" => verify_pattern_file(&config.device_path, expected_size, 0x55),
+            "sata_secure_erase" => verify_ata_erase(&config.device_path, expected_size),
+            "nvme_format" => verify_nvme_format(&config.device_path, expected_size),
+            method => Err(format!(
+                "no verification strategy exists for method {method}"
+            )),
+        }
     }?;
     result.identity_revalidated = true;
     Ok(result)
@@ -234,6 +246,46 @@ fn verify_nvme_format(path: &str, expected_size: u64) -> Result<VerificationResu
     })
 }
 
+fn verify_nvme_sanitize(
+    path: &str,
+    expected_size: u64,
+    action: NvmeSanitizeAction,
+) -> Result<VerificationResult, String> {
+    let capabilities = nvme::probe_sanitize_capabilities(path)?;
+    if !capabilities.supports(action) {
+        return Err(format!(
+            "the NVMe controller no longer advertises {} support",
+            action.display_name()
+        ));
+    }
+    let controller = nvme::controller_path(path)?;
+    let sanitize_log =
+        command_output_bytes("nvme", &["sanitize-log", &controller, "--raw-binary"])?;
+    nvme::validate_sanitize_log(
+        &sanitize_log,
+        action,
+        capabilities.supports_purge_reporting(),
+    )?;
+    let identify = command_output("nvme", &["id-ns", path, "-H"])?;
+    let health = command_output("nvme", &["smart-log", path])?;
+    let mut status_hasher = Sha256::new();
+    status_hasher.update(b"sanitize-log\0");
+    status_hasher.update(&sanitize_log);
+    status_hasher.update(b"id-ns\0");
+    status_hasher.update(identify.as_bytes());
+    status_hasher.update(b"smart-log\0");
+    status_hasher.update(health.as_bytes());
+    let (bytes_checked, readback_sha256) = sample_readback(path, expected_size)?;
+    Ok(VerificationResult {
+        strategy: VerificationStrategy::NvmeSanitizeStatusAndSamples,
+        bytes_checked,
+        readback_sha256,
+        expected_pattern: None,
+        firmware_status_sha256: Some(hex::encode(status_hasher.finalize())),
+        identity_revalidated: false,
+    })
+}
+
 fn command_output(command: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(command)
         .args(args)
@@ -249,6 +301,23 @@ fn command_output(command: &str, args: &[&str]) -> Result<String, String> {
         ));
     }
     Ok(text)
+}
+
+fn command_output_bytes(command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let output = Command::new(command)
+        .args(args)
+        .output()
+        .map_err(|error| format!("{command} could not start during verification: {error}"))?;
+    if !output.status.success() {
+        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        return Err(format!(
+            "{command} verification command failed with {}: {}",
+            output.status,
+            text.trim()
+        ));
+    }
+    Ok(output.stdout)
 }
 
 pub fn ata_security_is_disabled(output: &str) -> bool {

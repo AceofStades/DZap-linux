@@ -138,7 +138,8 @@ export interface VerificationResult {
 	strategy:
 		| "full_pattern_readback"
 		| "ata_security_status_and_samples"
-		| "nvme_format_status_and_samples";
+		| "nvme_format_status_and_samples"
+		| "nvme_sanitize_status_and_samples";
 	bytesChecked: number;
 	readbackSha256: string;
 	expectedPattern: string | null;

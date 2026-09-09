@@ -2,8 +2,9 @@ use serde::Serialize;
 use std::process::Command;
 
 use super::drives::{
-    DeviceIdentity, Drive, MobileDevice, detect_android_devices, detect_storage_drives,
+    DeviceIdentity, Drive, DriveType, MobileDevice, detect_android_devices, detect_storage_drives,
 };
+use super::nvme::{self, NvmeSanitizeAction};
 use super::wiper::{WipeConfig, get_wipe_methods_for_drive, get_wipe_methods_for_mobile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -448,6 +449,34 @@ fn probe_ata_hidden_areas(drive: &Drive) -> Vec<PreflightCheck> {
     )
 }
 
+fn probe_nvme_sanitize(method: &str, drive: &Drive) -> Vec<PreflightCheck> {
+    let Some(action) = NvmeSanitizeAction::from_method_id(method) else {
+        return Vec::new();
+    };
+    if drive.drive_type != DriveType::Nvme {
+        return Vec::new();
+    }
+
+    let capability = nvme::probe_sanitize_capabilities(&drive.name);
+    vec![match capability {
+        Ok(capabilities) => check(
+            "nvme_sanitize_capability",
+            capabilities.supports(action),
+            "The NVMe controller advertises the requested sanitize capability.",
+            format!(
+                "The NVMe controller does not advertise support for {}.",
+                action.display_name()
+            ),
+        ),
+        Err(error) => check(
+            "nvme_sanitize_capability",
+            false,
+            "The NVMe controller advertises the requested sanitize capability.",
+            format!("Could not verify NVMe sanitize capabilities: {error}."),
+        ),
+    }]
+}
+
 fn build_wipe_plan(config: &WipeConfig, require_identity: bool) -> Result<WipePlan, String> {
     if config.device_type.eq_ignore_ascii_case("android") {
         let identifier = if config.device_serial.is_empty() {
@@ -476,6 +505,7 @@ fn build_wipe_plan(config: &WipeConfig, require_identity: bool) -> Result<WipePl
                 if is_ata_drive(drive) {
                     plan.add_checks(probe_ata_hidden_areas(drive));
                 }
+                plan.add_checks(probe_nvme_sanitize(&config.method, drive));
                 plan
             }
             None => missing_device_plan(config, &config.device_path),
