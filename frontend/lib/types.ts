@@ -46,10 +46,8 @@ export type Device = StorageDevice | MobileDevice;
 // --- Other types ---
 
 export interface SmartAttribute {
-	id: number;
 	name: string;
-	normalized: number;
-	raw: number;
+	value: number;
 }
 
 export interface DriveHealth {
@@ -102,4 +100,57 @@ export interface WipePlan {
 	method: string;
 	identity: DeviceIdentity | null;
 	checks: PreflightCheck[];
+}
+
+export interface StartWipeResponse {
+	status: string;
+	jobId: string;
+	deviceId: string;
+}
+
+export interface EvidenceEvent {
+	sequence: number;
+	timestamp: string;
+	eventType: string;
+	message: string;
+	previousHash: string | null;
+	eventHash: string;
+}
+
+export interface WipeJobRecord {
+	id: string;
+	devicePath: string;
+	deviceModel: string;
+	deviceType: string;
+	identity: DeviceIdentity;
+	method: string;
+	status: "running" | "completed" | "failed";
+	startedAt: string;
+	completedAt: string | null;
+	failure: string | null;
+	evidenceHash: string;
+	events: EvidenceEvent[];
+}
+
+export interface CertificateData {
+	jobId: string;
+	devicePath: string;
+	deviceModel: string;
+	deviceSerial: string;
+	deviceWwn: string;
+	deviceSizeBytes: string;
+	deviceTransport: string;
+	deviceMajorMinor: string;
+	deviceType: string;
+	wipeMethod: string;
+	startedAt: string;
+	completedAt: string;
+	timestamp: string;
+	evidenceHash: string;
+}
+
+export interface SignedCertificate {
+	data: CertificateData;
+	signature: string;
+	publicKey: string;
 }

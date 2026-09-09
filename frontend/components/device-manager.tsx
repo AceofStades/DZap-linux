@@ -6,7 +6,6 @@ import {
 	Shield,
 	Zap,
 	Settings,
-	FileText,
 	Play,
 	Square,
 	HardDrive,
@@ -163,13 +162,13 @@ export function DeviceManager({
 		console.log("Starting wipe process for device:", device?.id);
 		try {
 			setPreflightError(null);
-			await startWipe({
+			const started = await startWipe({
 				...buildWipeRequest(device),
 				ExpectedIdentity: approvedPlan.identity,
 			});
 			setShowConfirmation(false);
 			router.push(
-				`/?tab=progress&jobId=${encodeURIComponent(device.id)}`,
+				`/?tab=progress&jobId=${encodeURIComponent(started.jobId)}`,
 			);
 		} catch (error) {
 			console.error("Failed to start wipe:", error);
@@ -195,8 +194,6 @@ export function DeviceManager({
 			// TODO: Show an error toast/message
 		}
 	};
-
-	const handleGenerateCertificate = async () => {};
 
 	const handleStopWipe = () => {
 		setShowStopConfirmation(true);
@@ -498,7 +495,7 @@ export function DeviceManager({
 
 				<Card
 					className="component-border component-border-hover"
-					disabled={isOSDrive}
+					aria-disabled={isOSDrive}
 				>
 					<CardHeader>
 						<CardTitle className="flex items-center space-x-2">
@@ -668,16 +665,6 @@ export function DeviceManager({
 									: isCompleted
 										? "Wipe Completed"
 										: "Start Wipe"}
-							</Button>
-
-							<Button
-								variant="outline"
-								size="lg"
-								disabled={isWiping || isOSDrive}
-								onClick={handleGenerateCertificate}
-							>
-								<FileText className="h-4 w-4 mr-2" />
-								Generate Certificate
 							</Button>
 
 							{!isReady && !isOSDrive && (
