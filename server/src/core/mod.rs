@@ -1,3 +1,4 @@
+pub mod ata;
 pub mod certificate;
 pub mod drives;
 pub mod jobs;

@@ -1,3 +1,4 @@
+use crate::core::ata::AtaEraseMode;
 use crate::core::drives::{Drive, DriveType, MobileDevice};
 use crate::core::wiper::*;
 use std::io::Write;
@@ -21,7 +22,7 @@ fn drive(drive_type: DriveType) -> Drive {
 }
 
 #[test]
-fn wipe_method_names_match_go() {
+fn wipe_method_names_are_stable() {
     assert_eq!(wipe_method_name("nvme_format"), "Purge: NVMe Format");
     assert_eq!(
         wipe_method_name("nvme_sanitize_crypto"),
@@ -44,6 +45,10 @@ fn wipe_method_names_match_go() {
         "Purge: ATA Secure Erase"
     );
     assert_eq!(
+        wipe_method_name("sata_secure_erase_enhanced"),
+        "Purge: ATA Enhanced Secure Erase"
+    );
+    assert_eq!(
         wipe_method_name("overwrite_3_pass"),
         "Purge: 3-Pass Overwrite"
     );
@@ -59,7 +64,7 @@ fn wipe_method_names_match_go() {
 }
 
 #[test]
-fn methods_per_drive_type_match_nist_table() {
+fn methods_are_scoped_to_compatible_drive_types() {
     let ids_of = |t: DriveType| -> Vec<String> {
         get_wipe_methods_for_drive(&drive(t))
             .into_iter()
@@ -78,7 +83,11 @@ fn methods_per_drive_type_match_nist_table() {
     );
     assert_eq!(
         ids_of(DriveType::Ssd),
-        ["sata_secure_erase", "overwrite_1_pass"]
+        [
+            "sata_secure_erase_enhanced",
+            "sata_secure_erase",
+            "overwrite_1_pass"
+        ]
     );
     assert_eq!(
         ids_of(DriveType::Hdd),
@@ -87,6 +96,19 @@ fn methods_per_drive_type_match_nist_table() {
     for t in [DriveType::Usb, DriveType::Unknown] {
         assert_eq!(ids_of(t), ["overwrite_2_pass"]);
     }
+}
+
+#[test]
+fn non_ata_ssd_does_not_offer_ata_security_erase() {
+    let mut target = drive(DriveType::Ssd);
+    target.transport = "sas".to_string();
+
+    let methods = get_wipe_methods_for_drive(&target)
+        .into_iter()
+        .map(|method| method.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(methods, ["overwrite_1_pass"]);
 }
 
 #[test]
@@ -265,6 +287,41 @@ fn command_runner_drains_output_while_the_process_is_running() {
             panic!("command runner blocked on a full output pipe: {error}");
         }
     }
+}
+
+#[test]
+fn failed_ata_erase_attempts_temporary_password_cleanup() {
+    let (progress, _messages) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut calls = Vec::new();
+
+    let error = sanitize_sata_with(
+        "/dev/test-ata",
+        AtaEraseMode::Enhanced,
+        &progress,
+        |phase, arguments| {
+            calls.push((phase, arguments.to_vec()));
+            if arguments.contains(&"--security-erase-enhanced".to_string()) {
+                Err("erase rejected".to_string())
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(error.contains("ATA erase command failed: erase rejected"));
+    assert!(error.contains("temporary ATA security password was disabled"));
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].0, AtaCommandPhase::Destructive);
+    assert!(calls[0].1.contains(&"--security-set-pass".to_string()));
+    assert_eq!(calls[1].0, AtaCommandPhase::Destructive);
+    assert!(
+        calls[1]
+            .1
+            .contains(&"--security-erase-enhanced".to_string())
+    );
+    assert_eq!(calls[2].0, AtaCommandPhase::Recovery);
+    assert!(calls[2].1.contains(&"--security-disable".to_string()));
 }
 
 #[test]

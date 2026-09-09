@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::process::Command;
 
+use super::ata::{self, AtaEraseMode};
 use super::drives::{
     DeviceIdentity, Drive, DriveType, MobileDevice, detect_android_devices, detect_storage_drives,
 };
@@ -449,6 +450,33 @@ fn probe_ata_hidden_areas(drive: &Drive) -> Vec<PreflightCheck> {
     )
 }
 
+fn probe_ata_security(method: &str, drive: &Drive) -> Vec<PreflightCheck> {
+    let Some(mode) = AtaEraseMode::from_method_id(method) else {
+        return Vec::new();
+    };
+    if drive.drive_type != DriveType::Ssd || !is_ata_drive(drive) {
+        return Vec::new();
+    }
+
+    vec![match ata::probe_security_capabilities(&drive.name) {
+        Ok(capabilities) => check(
+            "ata_security_capability",
+            capabilities.supports(mode),
+            "The drive advertises the requested ATA Security Erase capability.",
+            format!(
+                "The drive does not advertise support for {}.",
+                mode.display_name()
+            ),
+        ),
+        Err(error) => check(
+            "ata_security_capability",
+            false,
+            "The drive advertises the requested ATA Security Erase capability.",
+            format!("Could not verify ATA Security Erase capabilities: {error}."),
+        ),
+    }]
+}
+
 fn probe_nvme_sanitize(method: &str, drive: &Drive) -> Vec<PreflightCheck> {
     let Some(action) = NvmeSanitizeAction::from_method_id(method) else {
         return Vec::new();
@@ -504,6 +532,7 @@ fn build_wipe_plan(config: &WipeConfig, require_identity: bool) -> Result<WipePl
                 let mut plan = evaluate_storage_wipe_with_identity(config, drive, require_identity);
                 if is_ata_drive(drive) {
                     plan.add_checks(probe_ata_hidden_areas(drive));
+                    plan.add_checks(probe_ata_security(&config.method, drive));
                 }
                 plan.add_checks(probe_nvme_sanitize(&config.method, drive));
                 plan

@@ -1,4 +1,5 @@
 // Port of server-go/core/wiper.go
+use super::ata::{self, AtaEraseMode};
 use super::drives::{
     DeviceIdentity, Drive, DriveType, MobileDevice, detect_android_devices, detect_storage_drives,
     log_line,
@@ -102,6 +103,7 @@ pub(crate) fn wipe_method_name(method_id: &str) -> &'static str {
         "nvme_sanitize_overwrite" => "Purge: NVMe Sanitize (Overwrite)",
         "overwrite_1_pass" => "Clear: 1-Pass Overwrite",
         "sata_secure_erase" => "Purge: ATA Secure Erase",
+        "sata_secure_erase_enhanced" => "Purge: ATA Enhanced Secure Erase",
         "overwrite_3_pass" => "Purge: 3-Pass Overwrite",
         "overwrite_2_pass" => "Clear: 2-Pass Overwrite",
         "android_factory_reset" => "Clear: Factory Reset",
@@ -146,18 +148,30 @@ pub fn get_wipe_methods_for_drive(drive: &Drive) -> Vec<WipeMethod> {
             ]);
             methods
         }
-        DriveType::Ssd => vec![
-            m(
-                "sata_secure_erase",
-                "Purge: ATA Secure Erase",
-                "Uses the drive's built-in firmware command to reset all memory cells.",
-            ),
-            m(
+        DriveType::Ssd => {
+            let overwrite = m(
                 "overwrite_1_pass",
                 "Clear: Overwrite",
                 "Not fully effective for flash media due to wear-leveling and over-provisioning.",
-            ),
-        ],
+            );
+            if matches!(drive.transport.as_str(), "ata" | "ide" | "sata") {
+                vec![
+                    m(
+                        "sata_secure_erase_enhanced",
+                        "Purge: ATA Enhanced Secure Erase",
+                        "Uses the drive's advertised enhanced ATA Security Erase operation.",
+                    ),
+                    m(
+                        "sata_secure_erase",
+                        "Purge: ATA Secure Erase",
+                        "Uses the drive's ATA Security Erase operation.",
+                    ),
+                    overwrite,
+                ]
+            } else {
+                vec![overwrite]
+            }
+        }
         DriveType::Hdd => vec![
             m(
                 "overwrite_1_pass",
@@ -196,6 +210,14 @@ pub fn get_wipe_methods(device_path: &str) -> Result<Vec<WipeMethod>, String> {
                 methods.retain(|method| {
                     NvmeSanitizeAction::from_method_id(&method.id).is_none_or(|action| {
                         capabilities.is_some_and(|capabilities| capabilities.supports(action))
+                    })
+                });
+            }
+            if drive.drive_type == DriveType::Ssd {
+                let capabilities = ata::probe_security_capabilities(&drive.name).ok();
+                methods.retain(|method| {
+                    AtaEraseMode::from_method_id(&method.id).is_none_or(|mode| {
+                        capabilities.is_some_and(|capabilities| capabilities.supports(mode))
                     })
                 });
             }
@@ -247,9 +269,11 @@ fn sanitize_storage_drive(
     if let Some(action) = NvmeSanitizeAction::from_method_id(&config.method) {
         return sanitize_nvme(&config.device_path, action, progress);
     }
+    if let Some(mode) = AtaEraseMode::from_method_id(&config.method) {
+        return sanitize_sata(&config.device_path, mode, progress);
+    }
     match config.method.as_str() {
         "nvme_format" => sanitize_nvme_format(&config.device_path, progress),
-        "sata_secure_erase" => sanitize_sata(&config.device_path, progress),
         "overwrite_1_pass" => sanitize_overwrite(config, 1, progress),
         "overwrite_3_pass" => sanitize_overwrite(config, 3, progress),
         "overwrite_2_pass" => sanitize_overwrite_two_pass(config, progress),
@@ -414,28 +438,80 @@ fn sanitize_nvme_format(
     result
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AtaCommandPhase {
+    Destructive,
+    Recovery,
+}
+
 fn sanitize_sata(
     path: &str,
+    mode: AtaEraseMode,
     progress: &tokio::sync::mpsc::UnboundedSender<String>,
 ) -> Result<(), String> {
-    let _ = progress.send("Executing ATA Secure Erase...".to_string());
+    let capabilities = ata::probe_security_capabilities(path)?;
+    if !capabilities.supports(mode) {
+        return Err(format!(
+            "the drive does not advertise support for {}",
+            mode.display_name()
+        ));
+    }
     let controls = register_wipe(path);
-    let result = (|| {
-        run_command(
-            &controls.cancel,
-            "hdparm",
-            &["--user-master", "user", "--security-set-pass", "dZap", path],
-        )
-        .map_err(|e| format!("failed to set security password: {e}"))?;
-        let _ = progress.send("Security password set. Issuing erase...".to_string());
-        run_command(
-            &controls.cancel,
-            "hdparm",
-            &["--user-master", "user", "--security-erase", "dZap", path],
-        )
-    })();
+    let recovery_cancel = Arc::new(AtomicBool::new(false));
+    let result = sanitize_sata_with(path, mode, progress, |phase, arguments| {
+        let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let cancel = match phase {
+            AtaCommandPhase::Destructive => &controls.cancel,
+            AtaCommandPhase::Recovery => &recovery_cancel,
+        };
+        run_command(cancel, "hdparm", &argument_refs)
+    });
     unregister_wipe(path);
     result
+}
+
+pub(crate) fn sanitize_sata_with<F>(
+    path: &str,
+    mode: AtaEraseMode,
+    progress: &tokio::sync::mpsc::UnboundedSender<String>,
+    mut run: F,
+) -> Result<(), String>
+where
+    F: FnMut(AtaCommandPhase, &[String]) -> Result<(), String>,
+{
+    let _ = progress.send(format!("Executing {}...", mode.display_name()));
+    let set_password = ata::set_password_arguments(path);
+    if let Err(error) = run(AtaCommandPhase::Destructive, &set_password) {
+        return Err(cleanup_ata_password(
+            path,
+            format!("failed to set the temporary ATA security password: {error}"),
+            &mut run,
+        ));
+    }
+
+    let _ = progress.send("Temporary ATA security password set. Issuing erase...".to_string());
+    let erase = ata::erase_arguments(path, mode);
+    if let Err(error) = run(AtaCommandPhase::Destructive, &erase) {
+        return Err(cleanup_ata_password(
+            path,
+            format!("ATA erase command failed: {error}"),
+            &mut run,
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_ata_password<F>(path: &str, error: String, run: &mut F) -> String
+where
+    F: FnMut(AtaCommandPhase, &[String]) -> Result<(), String>,
+{
+    let disable_password = ata::disable_password_arguments(path);
+    match run(AtaCommandPhase::Recovery, &disable_password) {
+        Ok(()) => format!("{error}; temporary ATA security password was disabled"),
+        Err(cleanup_error) => {
+            format!("{error}; temporary ATA security password cleanup also failed: {cleanup_error}")
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

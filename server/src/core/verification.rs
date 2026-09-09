@@ -59,17 +59,19 @@ impl VerificationResult {
                 }
             }
             "sata_secure_erase"
+            | "sata_secure_erase_enhanced"
             | "nvme_format"
             | "nvme_sanitize_crypto"
             | "nvme_sanitize_block"
             | "nvme_sanitize_overwrite" => {
-                let expected_strategy = if method == "sata_secure_erase" {
-                    VerificationStrategy::AtaSecurityStatusAndSamples
-                } else if method == "nvme_format" {
-                    VerificationStrategy::NvmeFormatStatusAndSamples
-                } else {
-                    VerificationStrategy::NvmeSanitizeStatusAndSamples
-                };
+                let expected_strategy =
+                    if matches!(method, "sata_secure_erase" | "sata_secure_erase_enhanced") {
+                        VerificationStrategy::AtaSecurityStatusAndSamples
+                    } else if method == "nvme_format" {
+                        VerificationStrategy::NvmeFormatStatusAndSamples
+                    } else {
+                        VerificationStrategy::NvmeSanitizeStatusAndSamples
+                    };
                 let sample_size = expected_size.min(64 * 1024);
                 let final_offset = expected_size - sample_size;
                 let sample_count = match final_offset {
@@ -138,7 +140,9 @@ pub fn verify_wipe(config: &WipeConfig) -> Result<VerificationResult, String> {
             "overwrite_1_pass" => verify_pattern_file(&config.device_path, expected_size, 0x00),
             "overwrite_2_pass" => verify_pattern_file(&config.device_path, expected_size, 0xAA),
             "overwrite_3_pass" => verify_pattern_file(&config.device_path, expected_size, 0x55),
-            "sata_secure_erase" => verify_ata_erase(&config.device_path, expected_size),
+            "sata_secure_erase" | "sata_secure_erase_enhanced" => {
+                verify_ata_erase(&config.device_path, expected_size)
+            }
             "nvme_format" => verify_nvme_format(&config.device_path, expected_size),
             method => Err(format!(
                 "no verification strategy exists for method {method}"
